@@ -58,6 +58,12 @@ class SocketTunnel(threading.Thread):
             client = Client(account_id=account_id)
             command_line(msg=command, client=client)
 
+        elif action == "tournament_cancel":
+            # the season was cancelled from discord, the game forgets it (and stops a running match).
+            from tournament.manager import manager
+
+            manager.cancel()
+
         elif action == "list":
             response = {"players": []}
             for client in all_clients():

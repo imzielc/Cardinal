@@ -54,7 +54,8 @@ class Config(Storage):
         if self._merge_missing(config, template):
             self.commit(config)
 
-    def _merge_missing(self, config: dict, template: dict) -> bool:
+    @staticmethod
+    def _merge_missing(config: dict, template: dict) -> bool:
         """adds the keys of template missing in config (recursively), returns whether it changed."""
         changed = False
         for key, value in template.items():

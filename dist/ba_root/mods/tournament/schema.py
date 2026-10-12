@@ -4,7 +4,14 @@ from __future__ import annotations
 from dataclasses import asdict, field
 from pydantic.dataclasses import dataclass
 from pydantic import TypeAdapter
-from server.enums import SeriesType, TournamentStage, TournamentType, Status, TeamStatus
+from server.enums import (
+    SeriesType,
+    Status,
+    TeamStatus,
+    TournamentMode,
+    TournamentStage,
+    TournamentType,
+)
 
 class BaseSchema:
     """base schema for all the schemas."""
@@ -25,6 +32,7 @@ class SeasonSchema(BaseSchema):
 
     series: SeriesType = SeriesType.BO3
     type: TournamentType = TournamentType.SOLO
+    mode: TournamentMode = TournamentMode.SINGLE
     stage: TournamentStage = TournamentStage.REGISTRATION
     created_at: str = ""
     participant_role_id: int = 0
@@ -44,6 +52,10 @@ class MatchTeamSchema(BaseSchema):
     name: str | None = None
     score: int = 0
     series: int = 0
+    # double elimination: a slot is filled by the result of another match, "W:<bracket>:<round>:<match>"
+    # for its winner and "L:..." for its loser. a bye slot never gets a team.
+    source: str | None = None
+    bye: bool = False
 
 @dataclass
 class MatchSchema(BaseSchema):
@@ -56,6 +68,9 @@ class MatchSchema(BaseSchema):
     group_id: str | None = None
     round_id: str | None = None
     last_scores: list[int] = field(default_factory=lambda : [0, 0])
+    # double elimination: "winners", "losers" or "grand-final", and whether a bye decided the match.
+    bracket: str | None = None
+    is_bye: bool = False
 
 @dataclass
 class PendingMatchSchema(BaseSchema):
@@ -70,6 +85,8 @@ class RoundSchema(BaseSchema):
     """schema for a round."""
     matches: dict[str, MatchSchema] = field(default_factory=dict)
     status: Status = Status.PENDING
+    # the position of the round in its bracket (1 is the first), the round ids are not always numbers.
+    number: int = 0
 
 @dataclass
 class GroupSchema(BaseSchema):
@@ -89,8 +106,14 @@ class GroupStageSchema(BaseSchema):
 @dataclass
 class BracketsMetaSchema(BaseSchema):
     """schema for the brackets meta."""
-    active_round: str = ""
+    mode: TournamentMode = TournamentMode.SINGLE
+    started: bool = False
+    # the rounds that can be played right now, as "group-stage" or "<bracket>/<round>"
+    active_rounds: list[str] = field(default_factory=list)
     total_rounds: int = 0
+    status: Status = Status.PENDING
+    # {"rank": 1, "team": "name"}, filled in when the tournament is over.
+    placements: list[dict] = field(default_factory=list)
 
 @dataclass
 class MemberSchema(BaseSchema):
@@ -99,6 +122,14 @@ class MemberSchema(BaseSchema):
     code: str = ""
     account_id: str = ""
     device_uuid: str = ""
+
+    def to_public(self) -> dict:
+        """ masks the uuid and returns the dict. """
+        data = self.to_dict()
+        uuid = data["device_uuid"]
+        if uuid:
+            data["device_uuid"] = "***"
+        return data
 
 @dataclass
 class TeamSchema(BaseSchema):

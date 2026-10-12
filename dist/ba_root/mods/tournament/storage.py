@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import override
 
 from server.storage import Storage, MODS_DIR
+from server.enums import TournamentStage
 from tournament.schema import SeasonSchema, TournamentSchema
 
 SEASONS_DIR = MODS_DIR / "tournament" / "seasons"
@@ -69,6 +70,20 @@ class Tournament(Storage):
         data = self.read()
         data.seasons[season_id] = season
         self.commit(data)
+
+    def cancel_season(self, season_id: str) -> bool:
+        """cancels a season: it stops being the active one and its registrations close.
+        its files stay as they are. returns whether there was such a season."""
+        data = self.read()
+        season = data.seasons.get(season_id)
+        if season is None:
+            return False
+        season.stage = TournamentStage.CANCELLED
+        data.registrations_status = False
+        if data.active_season == season_id:
+            data.active_season = "0"
+        self.commit(data)
+        return True
 
     @property
     def are_registrations_open(self):

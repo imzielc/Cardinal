@@ -7,6 +7,7 @@ import random
 import subprocess
 import io
 from tournament.graphics.runner import GRAPHICS_DIR
+from tournament import posts
 from tournament.webhook import Webhook
 from pathlib import Path
 
@@ -91,6 +92,44 @@ def read_json(file_path: Path) -> dict:
         raise FileNotFoundError(f"Missing JSON file: {file_path}")
     with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+# the matches are stored as {"teams": [{"idx", "name", "score", "series"}, ...], "winner_idx": ...},
+# the drawing code below reads flat "team1" / "team2" / "winner" values, this converts one into the other.
+
+
+def adapt_match(match: dict, missing=None) -> dict:
+    """adds team1, team2 and winner (names) to a stored match."""
+    teams = match.get("teams")
+    if not isinstance(teams, list) or len(teams) < 2:
+        return match
+    names = [team.get("name") for team in teams[:2]]
+    winner_idx = match.get("winner_idx")
+    winner = names[winner_idx] if winner_idx in (0, 1) else None
+    return {
+        **match,
+        "team1": names[0] if names[0] is not None else missing,
+        "team2": names[1] if names[1] is not None else missing,
+        "winner": winner,
+    }
+
+
+def adapt_round(round_data: dict, missing=None) -> dict:
+    """adapts all the matches of a round."""
+    matches = round_data.get("matches", {})
+    return {
+        **round_data,
+        "matches": {key: adapt_match(match, missing) for key, match in matches.items()},
+    }
+
+
+def adapt_group_stage(data: dict) -> dict:
+    """adapts all the matches of all the groups, a missing team (None) is a bye there."""
+    groups = {}
+    for group_id, group in data.get("groups", {}).items():
+        rounds = {key: adapt_round(rd) for key, rd in group.get("rounds", {}).items()}
+        groups[group_id] = {**group, "rounds": rounds}
+    return {**data, "groups": groups}
 
 
 def get_font(size, bold=False):
@@ -549,11 +588,11 @@ def _group_background():
 
 
 def standings_title(name):
-    return name.replace("_", " ").upper() + " STANDINGS"
+    return f"GROUP {name} STANDINGS".upper()
 
 
 def schedule_title(name):
-    return name.replace("_", " ").upper()
+    return f"GROUP {name}".upper()
 
 
 def _generate_single_group_standings(
@@ -669,22 +708,22 @@ def _generate_single_group_standings(
     with io.BytesIO() as image_buffer:
         img.convert("RGB").save(image_buffer, "PNG", optimize=True)
         image_buffer.seek(0)
-        files = webhook.create(f"standings_{group_name.lower()}.png", image_buffer)
+        files = webhook.create(f"standings_group-{group_name}.png", image_buffer)
 
         # firstly check if there have been a standings sent for this group.
-        data = webhook.get(f"standings_{group_name.lower()}")
+        data = webhook.get(f"standings_group-{group_name}")
         if data:
             # there is a standings already sent.
             # we will edit it.
-            webhook.edit(f"standings_{group_name.lower()}", files)
+            webhook.edit(f"standings_group-{group_name}", files)
             return
 
         # there is no standings sent yet, we will send a new one.
-        webhook.send("dashboard", f"standings_{group_name.lower()}", files)
+        webhook.send("dashboard", f"standings_group-{group_name}", files)
 
 
 def generate_group_standings(json_file: Path, webhook: Webhook) -> None:
-    data = read_json(json_file)
+    data = adapt_group_stage(read_json(json_file))
 
     groups = data.get("groups", {})
     winning_limit = int(data.get("winning_teams_per_group", 4))
@@ -870,24 +909,22 @@ def _generate_group_schedule(group_name: str, group_data: dict, webhook: Webhook
     with io.BytesIO() as image_buffer:
         img.convert("RGB").save(image_buffer, "PNG", optimize=True)
         image_buffer.seek(0)
-        files = webhook.create(f"{group_name.lower()}.png", image_buffer)
-
-        # firstly check if there have been a bracket sent for this group.
-        data = webhook.get(f"{group_name.lower()}")
-        if data:
-            # there is a bracket already sent.
-            # we will edit it.
-            webhook.edit(f"{group_name.lower()}", files, content=f"<@&{group_data['role_id']}>, Your brackets are here.")
-            return
-        # there is no bracket sent yet, we will send a new one.
-        webhook.send("brackets", f"{group_name.lower()}", files, content=f"<@&{group_data['role_id']}>, Your brackets are here.")
+        # sent as a new message, or edited if this group's bracket was already sent (held for the
+        # owners to review first, when that is on).
+        posts.submit(
+            webhook,
+            "brackets",
+            f"group-{group_name}",
+            f"Group {group_name} brackets",
+            filename=f"group-{group_name}.png",
+            image=image_buffer.getvalue(),
+            content=f"<@&{group_data['role_id']}>, Your brackets are here.",
+        )
 
 
 def _generate_group_overview(groups: dict, webhook: Webhook) -> None:
-    # check if the overview image is sent for this season.
-    data = webhook.get("group-overview")
-    if data:
-        # there is an overview already sent.
+    # the overview is sent once per season, nothing to do if it was already sent (or is held).
+    if webhook.get("group-overview") or posts.find_pending(webhook.season_id, "group-overview"):
         return
     img = _group_background()
     add_watermark(img, LOGO_FILE, WIDTH, HEIGHT, alpha=0.4, y_pos=125)
@@ -987,12 +1024,19 @@ def _generate_group_overview(groups: dict, webhook: Webhook) -> None:
     with io.BytesIO() as image_buffer:
         img.convert("RGB").save(image_buffer, "PNG", optimize=True)
         image_buffer.seek(0)
-        files = webhook.create("group-overview.png", image_buffer)
-        webhook.send("brackets", "group-overview", files)
+        posts.submit(
+            webhook,
+            "brackets",
+            "group-overview",
+            "Group stage overview",
+            filename="group-overview.png",
+            image=image_buffer.getvalue(),
+            once=True,
+        )
 
 
 def generate_group_stage(json_file: Path, webhook: Webhook) -> None:
-    data = read_json(json_file)
+    data = adapt_group_stage(read_json(json_file))
 
     groups = data.get("groups", {})
     if not isinstance(groups, dict) or not groups:
@@ -1078,7 +1122,8 @@ def load_round_data(json_files: list) -> dict:
         if isinstance(filepath, str):
             filepath = Path(filepath)
         if filepath.exists():
-            rounds_data[filepath.name] = read_json(filepath)
+            # the main stage has no byes, a team that is not known yet is "TBD".
+            rounds_data[filepath.name] = adapt_round(read_json(filepath), "TBD")
     return rounds_data
 
 
@@ -1576,16 +1621,263 @@ def generate_mainstage_bracket(json_files: list, webhook: Webhook) -> None:
     with io.BytesIO() as image_buffer:
         img.convert("RGB").save(image_buffer, "PNG", optimize=True)
         image_buffer.seek(0)
-        files = webhook.create("mainstage-brackets.png", image_buffer)
-        # firstly check if there have been a bracket sent.
-        data = webhook.get(f"mainstage-brackets")
-        if data:
-            # there is a bracket already sent.
-            # we will edit it.
-            webhook.edit(f"mainstage-brackets", files)
-            return
-        # there is no bracket sent yet, we will send a new one.
-        webhook.send("brackets", f"mainstage-brackets", files)
+        posts.submit(
+            webhook,
+            "brackets",
+            "mainstage-brackets",
+            "Main stage bracket",
+            filename="mainstage-brackets.png",
+            image=image_buffer.getvalue(),
+        )
+
+
+# ---- double elimination ----
+# one image: the winners bracket on top, the losers bracket below it and the grand final on the right.
+# a slot that waits for a team says where the team comes from ("Winner W1.2", "Loser W2.1"), W is the
+# winners bracket and L the losers bracket, the number is round.match.
+
+DE_CARD_W, DE_CARD_H = 330, 92
+DE_COL_GAP, DE_ROW_GAP = 70, 34
+DE_MARGIN = 90
+DE_HEADER_H = 250
+DE_SECTION_H = 150
+DE_WINNERS_COLOR = BLUE
+DE_LOSERS_COLOR = (255, 150, 60)
+
+
+def de_label(bracket: str, round_id, match_id) -> str:
+    if bracket == "winners":
+        return f"W{round_id}.{match_id}"
+    if bracket == "losers":
+        return f"L{round_id}.{match_id}"
+    return f"GF{match_id}"
+
+
+def de_slot_text(slot: dict) -> tuple[str, tuple]:
+    """the text and colour of a team slot."""
+    if slot.get("name") is not None:
+        return str(slot["name"]), WHITE
+    if slot.get("bye"):
+        return "BYE", BYE
+    source = slot.get("source")
+    if not source:
+        return "TBD", MUTED
+    kind, bracket, round_id, match_id = source.split(":")
+    word = "Winner" if kind == "W" else "Loser"
+    return f"{word} {de_label(bracket, round_id, match_id)}", MUTED
+
+
+def draw_de_card(img, d, box, match: dict, accent, font, label_font):
+    x1, y1, x2, y2 = box
+    mid_y = (y1 + y2) / 2
+    played_bye = match.get("is_bye", False)
+    outline = (*accent, 70 if played_bye else 190)
+    draw_alpha_rounded_rectangle(
+        img, box, radius=10, fill=(10, 9, 22, 150 if played_bye else 235), outline=outline, width=2
+    )
+    d.text(
+        (x1 + 2, y1 - 20),
+        de_label(match["bracket"], match["round_id"], match["match_id"]),
+        font=label_font,
+        fill=(*accent, 255),
+    )
+
+    winner_idx = match.get("winner_idx")
+    rows = ((x1 + 4, y1 + 4, x2 - 4, mid_y - 2), (x1 + 4, mid_y + 2, x2 - 4, y2 - 4))
+    for idx, (slot, row) in enumerate(zip(match["teams"][:2], rows)):
+        won = winner_idx == idx and match.get("status") == "COMPLETED" and not played_bye
+        lost = winner_idx is not None and winner_idx != idx and match.get("status") == "COMPLETED"
+        draw_alpha_rounded_rectangle(
+            img, row, radius=5, fill=(20, 45, 30, 210) if won else (16, 14, 34, 190)
+        )
+        text, color = de_slot_text(slot)
+        if won:
+            color = GREEN
+        elif lost and slot.get("name") is not None:
+            color = RED_BOARD
+        name_box = (row[0] + 6, row[1], row[2] - 56, row[3])
+        center_text_box(d, name_box, truncate_text(d, text, name_box[2] - name_box[0], font), font, color)
+        if slot.get("name") is not None and match.get("status") == "COMPLETED" and not played_bye:
+            center_text_box(d, (row[2] - 52, row[1], row[2] - 6, row[3]), str(slot.get("score", 0)), font, WHITE)
+
+
+def read_rounds(season_dir: Path, bracket: str) -> dict:
+    """the rounds of a bracket (the files of its folder), as {round id: round}, in the order they are played."""
+    rounds = {}
+    for file in (season_dir / "rounds" / bracket).glob("*.json"):
+        rounds[file.stem] = read_json(file)
+    return dict(sorted(rounds.items(), key=lambda item: item[1].get("number", 0)))
+
+
+def generate_double_elimination(season_dir: Path, webhook: Webhook) -> None:
+    data = {
+        "winners": read_rounds(season_dir, "winners"),
+        "losers": read_rounds(season_dir, "losers"),
+        "grand_final": read_rounds(season_dir, "grand-final").get("1", {}),
+        "placements": read_json(season_dir / "brackets.json").get("placements", []),
+    }
+    winners = data.get("winners", {})
+    losers = data.get("losers", {})
+    grand_final = data.get("grand_final", {}).get("matches", {})
+    if not winners:
+        return
+
+    winner_rounds = sorted(winners, key=int)
+    loser_rounds = sorted(losers, key=int)
+    columns = max(len(winner_rounds), len(loser_rounds)) + 1  # + the grand final
+    first_round_matches = len(winners[winner_rounds[0]]["matches"])
+
+    unit = DE_CARD_H + DE_ROW_GAP
+    winners_h = first_round_matches * unit
+    losers_h = max(1, first_round_matches // 2) * unit
+    width = DE_MARGIN * 2 + columns * DE_CARD_W + (columns - 1) * DE_COL_GAP
+    width = max(width, 1700)
+    legend_h = 150
+    height = DE_HEADER_H + DE_SECTION_H + winners_h + DE_SECTION_H + losers_h + legend_h
+
+    # the final ranks panel sits under the grand final, make sure the image is tall enough for it.
+    placements = data.get("placements", [])
+    if placements:
+        grand_final_y = (DE_HEADER_H + DE_SECTION_H + DE_HEADER_H + DE_SECTION_H * 2 + winners_h + losers_h) / 2 - DE_CARD_H
+        panel_bottom = grand_final_y + 2 * (DE_CARD_H + DE_SECTION_H) + 60 + 34 * min(8, len(placements)) + 40
+        height = max(height, int(panel_bottom))
+
+    img = make_background(
+        width,
+        height,
+        ellipse1=((-400, -700, width + 400, height + 900), (*PURPLE, 30), 6),
+        ellipse2=((-300, -600, width + 300, height + 800), (*BLUE, 25), 4),
+        star_count=max(200, width * height // 20000),
+        star_seed=42,
+        star_radius_choices=(2, 2, 3),
+        star_alpha_range=(20, 80),
+    )
+    add_watermark(img, LOGO_FILE, width, height, alpha=0.12, thumb_size=(1000, 1000))
+    if os.path.exists(TITLE_FILE):
+        title_img = Image.open(TITLE_FILE).convert("RGBA")
+        title_img.thumbnail((1200, 200), Image.Resampling.LANCZOS)
+        img.alpha_composite(title_img, ((width - title_img.width) // 2, 20))
+    d = ImageDraw.Draw(img)
+
+    title_font = get_font(44, True)
+    sub_font = get_font(22, False)
+    round_font = get_font(22, True)
+    card_font = get_font(25, True)
+    label_font = get_font(17, True)
+
+    def column_x(col: int) -> float:
+        return DE_MARGIN + col * (DE_CARD_W + DE_COL_GAP)
+
+    positions = {}  # "bracket-round-match" -> (left x, centre y)
+
+    def place(bracket: str, rounds: dict, order: list, top: float, total_h: float):
+        for col, round_id in enumerate(order):
+            matches = rounds[round_id]["matches"]
+            count = len(matches)
+            for match_id in sorted(matches, key=int):
+                cy = top + (int(match_id) - 0.5) * (total_h / count)
+                positions[f"{bracket}-{round_id}-{match_id}"] = (column_x(col), cy)
+
+    winners_top = DE_HEADER_H + DE_SECTION_H
+    losers_top = winners_top + winners_h + DE_SECTION_H
+    place("winners", winners, winner_rounds, winners_top, winners_h)
+    place("losers", losers, loser_rounds, losers_top, losers_h)
+
+    # the grand final sits in the last column, in the middle of the two brackets
+    gf_x = column_x(columns - 1)
+    gf_cy = (winners_top + losers_top + losers_h) / 2 - DE_CARD_H
+    for i, match_id in enumerate(sorted(grand_final, key=int)):
+        positions[f"grand-final-1-{match_id}"] = (gf_x, gf_cy + i * (DE_CARD_H + DE_SECTION_H))
+
+    # section titles
+    def section(text, hint, color, y):
+        d.text((DE_MARGIN, y), text, font=title_font, fill=color)
+        d.text((DE_MARGIN, y + 56), hint, font=sub_font, fill=MUTED)
+
+    section("WINNERS BRACKET", "Lose once and you drop to the losers bracket.", DE_WINNERS_COLOR, winners_top - DE_SECTION_H + 10)
+    section("LOSERS BRACKET", "Lose here and you are out.", DE_LOSERS_COLOR, losers_top - DE_SECTION_H + 10)
+    d.text((gf_x, winners_top - DE_SECTION_H + 10), "GRAND FINAL", font=title_font, fill=GOLD)
+    d.text((gf_x, winners_top - DE_SECTION_H + 66), "Winners champion must lose twice.", font=sub_font, fill=MUTED)
+
+    # round names above the first match of each column
+    def round_names(rounds: dict, order: list, top: float, accent, last_name: str):
+        for col, round_id in enumerate(order):
+            name = last_name if col == len(order) - 1 else f"ROUND {round_id}"
+            d.text((column_x(col), top - 44), name, font=round_font, fill=accent)
+
+    round_names(winners, winner_rounds, winners_top, DE_WINNERS_COLOR, "WINNERS FINAL")
+    if loser_rounds:
+        round_names(losers, loser_rounds, losers_top, DE_LOSERS_COLOR, "LOSERS FINAL")
+
+    # lines: a winner moving on in the same bracket, and the two champions going to the grand final
+    def connect(a: tuple, b: tuple, color):
+        ax, ay = a[0] + DE_CARD_W, a[1]
+        bx, by = b[0], b[1]
+        mid = ax + (bx - ax) / 2
+        d.line([(ax, ay), (mid, ay), (mid, by), (bx, by)], fill=(*color, 150), width=3)
+
+    every = [m for part in (winners, losers) for rd in part.values() for m in rd["matches"].values()]
+    every += list(grand_final.values())
+    for match in every:
+        key = f"{match['bracket']}-{match['round_id']}-{match['match_id']}"
+        for slot in match["teams"]:
+            source = slot.get("source")
+            if not source:
+                continue
+            kind, bracket, round_id, match_id = source.split(":")
+            if kind == "W" and f"{bracket}-{round_id}-{match_id}" in positions:
+                color = GOLD if match["bracket"] == "grand-final" else (
+                    DE_WINNERS_COLOR if bracket == "winners" else DE_LOSERS_COLOR
+                )
+                connect(positions[f"{bracket}-{round_id}-{match_id}"], positions[key], color)
+
+    # the cards
+    for match in every:
+        key = f"{match['bracket']}-{match['round_id']}-{match['match_id']}"
+        x, cy = positions[key]
+        accent = {"winners": DE_WINNERS_COLOR, "losers": DE_LOSERS_COLOR}.get(match["bracket"], GOLD)
+        box = (x, cy - DE_CARD_H / 2, x + DE_CARD_W, cy + DE_CARD_H / 2)
+        draw_de_card(img, d, box, match, accent, card_font, label_font)
+
+    # the final ranks, once the bracket is over
+    if placements:
+        medals = {1: GOLD, 2: SILVER, 3: BRONZE}
+        panel_x, panel_y = gf_x, gf_cy + 2 * (DE_CARD_H + DE_SECTION_H) - 20
+        d.text((panel_x, panel_y), "FINAL RANKS", font=round_font, fill=GOLD)
+        for i, place_data in enumerate(placements[:8]):
+            rank = place_data["rank"]
+            d.text(
+                (panel_x, panel_y + 40 + i * 34),
+                f"{rank}. {truncate_text(d, str(place_data['team']), DE_CARD_W - 50, card_font)}",
+                font=card_font,
+                fill=medals.get(rank, WHITE),
+            )
+
+    legend_y = height - legend_h + 30
+    d.text(
+        (DE_MARGIN, legend_y),
+        "W2.1 = winners bracket, round 2, match 1     L3.2 = losers bracket, round 3, match 2     GF = grand final",
+        font=sub_font,
+        fill=MUTED,
+    )
+    d.text(
+        (DE_MARGIN, legend_y + 36),
+        "'Loser W2.1' means the loser of that match drops into this slot.   BYE = no opponent, the team moves on.",
+        font=sub_font,
+        fill=MUTED,
+    )
+
+    with io.BytesIO() as image_buffer:
+        img.convert("RGB").save(image_buffer, "PNG", optimize=True)
+        image_buffer.seek(0)
+        posts.submit(
+            webhook,
+            "brackets",
+            "double-elimination-brackets",
+            "Double elimination bracket",
+            filename="double-elimination-brackets.png",
+            image=image_buffer.getvalue(),
+        )
 
 
 def generate_player_registration(name: str, webhook: Webhook):
@@ -1680,14 +1972,14 @@ if __name__ == "__main__":
         # for group stage
         generate_group_stage(SEASON_DIR / "rounds" / "group-stage.json", webhook)
 
+    elif data["type"] == "double-elimination":
+        generate_double_elimination(SEASON_DIR, webhook)
+
     elif data["type"] == "main-stage":
         # for main stage
-        files = [
-            file
-            for file in SEASON_DIR.glob("rounds/*.json")
-            if file.name != "group-stage.json"
-        ]
-        sorted_files = sorted(files, key=lambda x: x.stat().st_ctime)
+        # the rounds are in the order they are played (the first one has the most matches).
+        rounds = read_rounds(SEASON_DIR, "main-stage")
+        sorted_files = [SEASON_DIR / "rounds" / "main-stage" / f"{name}.json" for name in rounds]
         generate_mainstage_bracket(
             json_files=sorted_files, webhook=webhook
         )

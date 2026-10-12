@@ -12,6 +12,8 @@
         "token": "ENTER-YOUR-BOT-TOKEN-HERE",
         "port": 9001,
         "owner_id": 0,
+        "staff_channel_id": 0,
+        "hold_hours": 3,
         "webhooks": {
             "brackets": "ENTER-YOUR-WEBHOOK-URL-HERE",
             "dashboard": "ENTER-YOUR-WEBHOOK-URL-HERE",

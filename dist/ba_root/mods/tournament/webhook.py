@@ -10,6 +10,7 @@ class Webhook(Storage):
 
     def __init__(self, season_id: str) -> None:
         super().__init__("webhooks.json", SEASONS_DIR / season_id)
+        self.season_id = season_id
         self.dashboard_url = config.discord.webhooks.dashboard
         self.results_url = config.discord.webhooks.results
         self.brackets_url = config.discord.webhooks.brackets

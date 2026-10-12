@@ -11,6 +11,35 @@ from tournament.registration import Registration
 TEAM_NAME_MAX_LENGTH = 40
 
 
+class ConfirmView(ui.View):
+    """asks the user to confirm something that cannot be undone, only that user can answer."""
+
+    def __init__(self, user_id: int, on_confirm, confirm_label: str = "Yes", abort_text: str = "Okay, nothing was changed."):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.on_confirm = on_confirm
+        self.abort_text = abort_text
+        self.confirm.label = confirm_label
+
+    async def interaction_check(self, interaction: Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This is not your confirmation.", ephemeral=True
+            )
+            return False
+        return True
+
+    @ui.button(label="Yes", style=ButtonStyle.danger)
+    async def confirm(self, interaction: Interaction, button: ui.Button):
+        self.stop()
+        await self.on_confirm(interaction)
+
+    @ui.button(label="No", style=ButtonStyle.secondary)
+    async def abort(self, interaction: Interaction, button: ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content=self.abort_text, view=None)
+
+
 def participant_role(guild: Guild, season_id: str) -> Role | None:
     """returns the participant role of the season."""
     season = tournament.get_season(season_id)

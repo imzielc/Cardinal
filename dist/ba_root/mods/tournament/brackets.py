@@ -1,9 +1,12 @@
 """storage for brackets"""
 
+import json
+import random
 from pathlib import Path
 
-from server.enums import Status
+from server.enums import Status, TournamentMode, TournamentStage
 from server.storage import Storage
+from tournament import stages
 from tournament.storage import SEASONS_DIR
 from tournament.registration import Registration
 from tournament.graphics import runner
@@ -15,8 +18,11 @@ class Brackets(Storage):
     def __init__(self, season_id: str):
         super().__init__("brackets.json", SEASONS_DIR / season_id)
         self.season_id = season_id
-        self.group_stage_path = self.directory / "rounds" / "group-stage.json"
-        self.group_stage_path.parent.mkdir(parents=True, exist_ok=True)
+        # the rounds of a stage are files in folders: rounds/<bracket>/<round>.json, only the group
+        # stage is one file, rounds/group-stage.json
+        self.rounds_dir = self.directory / "rounds"
+        self.group_stage_path = self.rounds_dir / "group-stage.json"
+        self.rounds_dir.mkdir(parents=True, exist_ok=True)
         self.bootstrap()
 
     def bootstrap(self):
@@ -53,7 +59,7 @@ class Brackets(Storage):
             winning_teams_per_group = winning_teams_per_group // 2
 
         for index in range(groups_count):
-            group_id = f"group-{index + 1}"
+            group_id = str(index + 1)
             groups[group_id] = GroupSchema(
                 rounds = self.generate_round_robin(
                     teams[index * teams_per_group : (index + 1) * teams_per_group],
@@ -76,7 +82,10 @@ class Brackets(Storage):
 
         # also update it in brackets.json that groupstage is active;
         brackets = self.read_meta()
-        brackets.active_round = "group-stage"
+        brackets.mode = TournamentMode.SINGLE
+        brackets.started = True
+        brackets.status = Status.IN_PROGRESS
+        brackets.active_rounds = ["group-stage"]
         brackets.total_rounds += 1
         self.commit_meta(brackets)
 
@@ -98,16 +107,22 @@ class Brackets(Storage):
                 first = teams[i]  # first in sense of next front.
                 last = teams[count - 1 - i]  # last in sense of previous back.
 
-                match = self.create_match_format(team1=first, team2=last, match_id = f"match-{i + 1}",group_id=group_id, round_id=f"round {round}")
+                match = self.create_match_format(
+                    team1=first,
+                    team2=last,
+                    match_id=str(i + 1),
+                    group_id=group_id,
+                    round_id=str(round),
+                )
 
                 # if one of them is None, we give them BYEs.
                 if first is None or last is None:
                     match.status = Status.COMPLETED
                     match.winner_idx = 0 if last is None else 1
 
-                round_matches[f"match-{i + 1}"] = match
+                round_matches[match.match_id] = match
 
-            rounds[f"round-{round}"] = RoundSchema(matches = round_matches, status = Status.IN_PROGRESS if round == 1 else Status.PENDING)
+            rounds[str(round)] = RoundSchema(matches = round_matches, status = Status.IN_PROGRESS if round == 1 else Status.PENDING)
 
             # shuffle it so the teams dont get matched up with the same team twice.
             teams = [teams[0]] + [teams[-1]] + teams[1:-1]
@@ -135,7 +150,7 @@ class Brackets(Storage):
         # lets check if the round of all groups is completed.
         if all_groups_round_completed:
             # all matches are completed.
-            next_round_id = f"round {int(round_id.split()[1]) + 1}"
+            next_round_id = str(int(round_id) + 1)
 
             for g in gs.groups.values():
                 if round_id in g.rounds:
@@ -169,32 +184,112 @@ class Brackets(Storage):
         self.send_groupstage_brackets()
         self.send_group_stage_standings()
 
-    def update_ms_match(self, match: MatchSchema):
-        """updates the match of the main-stage."""
-        current_round_path = self.get_active_round_path()
-        current_round_data = self.read_ms(current_round_path)
+    # ---- the knockout stage (single and double elimination) ----
 
-        current_round_data.matches[match.match_id] = match
+    def read_stage(self) -> stages.Stage:
+        """reads all the rounds of the knockout stage."""
+        stage: stages.Stage = {}
+        for folder in sorted(self.rounds_dir.iterdir()):
+            if not folder.is_dir():
+                continue
+            rounds = {
+                file.stem: RoundSchema.from_dict(self.read(file))
+                for file in folder.glob("*.json")
+            }
+            if rounds:
+                stage[folder.name] = rounds
+        return stage
+
+    @staticmethod
+    def snapshot(stage: stages.Stage) -> dict[str, str]:
+        """the text of every round, to find out which rounds changed."""
+        return {
+            f"{bracket}/{round_id}": json.dumps(round_data.to_dict(), sort_keys=True)
+            for bracket, rounds in stage.items()
+            for round_id, round_data in rounds.items()
+        }
+
+    def commit_stage(self, stage: stages.Stage, before: dict[str, str] | None = None) -> None:
+        """writes the rounds, only the ones that changed since the snapshot when there is one."""
+        after = self.snapshot(stage)
+        for key, text in after.items():
+            if before is not None and before.get(key) == text:
+                continue
+            path = self.rounds_dir / f"{key}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.commit(json.loads(text), path)
+
+    def start_stage(self, stage: stages.Stage, mode: TournamentMode) -> None:
+        """saves a freshly built stage, makes it the active one and sends its brackets."""
+        stages.settle(stage, mode)
+        self.commit_stage(stage)
+
+        brackets = self.read_meta()
+        brackets.mode = mode
+        brackets.started = True
+        brackets.status = Status.IN_PROGRESS
+        brackets.active_rounds = stages.active_rounds(stage)
+        brackets.total_rounds += sum(len(rounds) for rounds in stage.values())
+        self.commit_meta(brackets)
+        self.send_stage_brackets()
+
+    def refresh(self) -> None:
+        """settles the stage again, this repairs a stage a crash only saved partly."""
+        brackets = self.read_meta()
+        if not brackets.started or "group-stage" in brackets.active_rounds:
+            return
+        stage = self.read_stage()
+        if not stage:
+            return
+        before = self.snapshot(stage)
+        stages.settle(stage, brackets.mode)
+        self.commit_stage(stage, before)
+        brackets.active_rounds = stages.active_rounds(stage)
+        self.commit_meta(brackets)
+
+    def generate_double_elimination(self, teams: list) -> bool:
+        """generates the double elimination bracket for the teams (any number, at least 4)."""
+        self.start_stage(stages.build_double(teams), TournamentMode.DOUBLE)
+        return True
+
+    def update_match(self, match: MatchSchema) -> None:
+        """updates a completed match of the knockout stage, and moves the teams along."""
+        brackets = self.read_meta()
+        stage = self.read_stage()
+        before = self.snapshot(stage)
+
+        stored = stage[match.bracket][match.round_id].matches[match.match_id]
+        # the played values (scores, winner) are the ones to keep, the slots stay as they are.
+        for slot, played in zip(stored.teams, match.teams):
+            slot.score, slot.series = played.score, played.series
+        stored.winner_idx, stored.loser_idx = match.winner_idx, match.loser_idx
+        stored.last_scores = match.last_scores
+        stored.status = Status.COMPLETED
         match.status = Status.COMPLETED
 
-        if all(
-            match.status == Status.COMPLETED
-            for match in current_round_data.matches.values()
-        ):
-            # all matches are completed.
-            current_round_data.status = Status.COMPLETED
-            # commit now because next round will check the status of the current round.
-            self.commit_ms(current_round_data, current_round_path)
-            self.send_mainstage_brackets()
-            # load the next round only if finals has not been completed.
-            if current_round_path.name == "finals.json":
-                self.announce_tournament_completion()
-                return
-            self.generate_ms_next_round()
-            return
+        stages.settle(stage, brackets.mode)
+        self.commit_stage(stage, before)
 
-        self.commit_ms(current_round_data, current_round_path)
-        self.send_mainstage_brackets()
+        completed, placements = stages.outcome(stage, brackets.mode)
+        brackets.active_rounds = stages.active_rounds(stage)
+        if completed:
+            brackets.status = Status.COMPLETED
+            brackets.placements = placements
+        self.commit_meta(brackets)
+        self.send_stage_brackets()
+
+        if completed:
+            self.announce_tournament_completion()
+
+    def save_match(self, match: MatchSchema) -> None:
+        """saves the progress (scores) of a match that is still being played."""
+        stage = self.read_stage()
+        before = self.snapshot(stage)
+        stored = stage[match.bracket][match.round_id].matches[match.match_id]
+        for slot, played in zip(stored.teams, match.teams):
+            slot.score, slot.series = played.score, played.series
+        stored.last_scores = match.last_scores
+        self.commit_stage(stage, before)
 
     def recalculate_group_standings(self, group: GroupSchema) -> None:
         """recalculates the group standings based on:
@@ -269,15 +364,13 @@ class Brackets(Storage):
 
         runner.run(data=data)
 
-    def generate_first_round(
+    def make_pairings(
         self, teams: dict[str, GroupSchema] | list, winning_teams_per_group: int = 0
-    ) -> RoundSchema:
-        "generate first round of the main-stage."
+    ) -> list[tuple[str, str]]:
+        "pairs the teams for the first round of the main-stage."
         pairings = []
         if isinstance(teams, list):
             # there was no group stage before main-stage.
-            import random
-
             shuffled_teams = teams.copy()
             random.shuffle(shuffled_teams)
 
@@ -312,90 +405,30 @@ class Brackets(Storage):
                         winning_teams_per_group - 1 - index
                     ]
                     pairings.append((team1, team2))
-
-        # we have the pairings now.
-        matches = {}
-        for index, (t1, t2) in enumerate(pairings, start=1):
-            matches[f"match-{index}"] = self.create_match_format(team1=t1, team2=t2, match_id = f"match-{index}")
-
-        return RoundSchema(matches = matches, status = Status.IN_PROGRESS)
-
+        return pairings
 
     def generate_main_stage(self, teams: list = []):
-        """generates the main stage"""
-        brackets = self.read_meta()
-
+        """generates the main stage (single elimination)"""
         if teams:
             # there was no group stage before us.
-            round_data = self.generate_first_round(teams)
+            pairings = self.make_pairings(teams)
         else:
             # there was a group stage before us.
             # to make the match to be fair, we will shuffle them first to last; like we did for group-stage matches
             # but only once per team.
             gs = self.read_gs()
-            round_data = self.generate_first_round(
-                gs.groups, gs.winning_teams_per_group
-            )
+            pairings = self.make_pairings(gs.groups, gs.winning_teams_per_group)
 
-        round_name = self.get_round_name(len(round_data.matches) * 2)
-        brackets.total_rounds += 1
-        brackets.active_round = round_name
-        self.commit_meta(brackets)
-        file_path = self.get_active_round_path()
-        self.commit_ms(round_data, path=file_path)
-
-        # send the brackets to discord.
-        self.send_mainstage_brackets()
-
-    def generate_ms_next_round(self):
-        """generates the next rounds of main-stage"""
-        brackets = self.read_meta()
-        current_round_path = self.get_active_round_path()
-        current_round_data = self.read_ms(current_round_path)
-        if current_round_data.status != Status.COMPLETED:
-            # the round did not complete. we cannot generate the next.
-            return
-
-        matches_data = current_round_data.matches
-        next_matches = {}
-
-        winners = [team.name for match in matches_data.values() for team in match.teams if team.idx == match.winner_idx]
-
-        if len(winners) == 2:
-            # we just finished semi-finals.
-            # finals has two matches.. first is for 1st/2nd position between semi-finals winners
-            # second is for 3rd position between semi-finals losers
-            losers = [team.name for match in matches_data.values() for team in match.teams if team.idx == match.loser_idx]
-
-            next_matches["FINALS"] = self.create_match_format(
-                team1=winners[0], team2=winners[1], match_id = "FINALS"
-            )
-            next_matches["THIRD_PLACE"] = self.create_match_format(
-                team1=losers[0], team2=losers[1], match_id = "THIRD_PLACE"
-            )
-
-        else:
-            # standard rounds.
-            match_count = 1
-            for i in range(0, len(winners), 2):
-                next_matches[f"match-{match_count}"] = self.create_match_format(
-                    team1=winners[i], team2=winners[i + 1], match_id = f"match-{match_count}"
-                )
-                match_count += 1
-
-        next_round_data = RoundSchema(matches = next_matches, status = Status.IN_PROGRESS)
-        next_round_name = self.get_round_name(len(winners))
-        brackets.active_round = next_round_name
-        brackets.total_rounds += 1
-        self.commit_meta(brackets)
-        next_round_path = self.get_active_round_path()
-        self.commit_ms(next_round_data, next_round_path)
+        self.start_stage(stages.build_single(pairings), TournamentMode.SINGLE)
 
     def announce_tournament_completion(self) -> None:
         """announces the tournament completion."""
         from tournament import tournament
 
         db = tournament.read()
+        season = db.seasons.get(self.season_id)
+        if season:
+            season.stage = TournamentStage.COMPLETED
         db.active_season = "0"
         tournament.commit(db)
 
@@ -413,10 +446,25 @@ class Brackets(Storage):
         }
         runner.run(data=data)
 
+    def send_stage_brackets(self) -> None:
+        """sends the brackets of the knockout stage, the image depends on the mode."""
+        if self.read_meta().mode == TournamentMode.DOUBLE:
+            self.send_double_elimination_brackets()
+        else:
+            self.send_mainstage_brackets()
+
     def send_mainstage_brackets(self) -> None:
         """sends the mainstage brackets."""
         data = {
             "type": "main-stage",
+            "season_id": self.season_id,
+        }
+        runner.run(data=data)
+
+    def send_double_elimination_brackets(self) -> None:
+        """sends the double elimination bracket."""
+        data = {
+            "type": "double-elimination",
             "season_id": self.season_id,
         }
         runner.run(data=data)
@@ -462,13 +510,6 @@ class Brackets(Storage):
         }
         runner.run(data=data)
 
-    def get_active_round_path(self) -> Path:
-        """returns the active round path."""
-        brackets = self.read_meta()
-        return (self.directory / "rounds" / brackets.active_round).with_suffix(
-            ".json"
-        )
-
     def read_meta(self) -> BracketsMetaSchema:
         return BracketsMetaSchema.from_dict(self.read())
 
@@ -481,22 +522,16 @@ class Brackets(Storage):
     def commit_gs(self, data: GroupStageSchema) -> None:
         self.commit(data.to_dict(), self.group_stage_path)
 
-    def read_ms(self, path: Path) -> RoundSchema:
-        return RoundSchema.from_dict(self.read(path))
-
-    def commit_ms(self, data: RoundSchema, path: Path) -> None:
-        self.commit(data.to_dict(), path)
-
     def list_matches(self) -> dict[str, MatchSchema]:
-        """ returns the list of all the matches in active round."""
-        round_path = self.get_active_round_path()
-        if not round_path.exists():
+        """ returns the list of all the matches in the active rounds."""
+        brackets = self.read_meta()
+        if not brackets.active_rounds:
             return {} # no active round.
 
         matches = {}
 
         # if the round is groupstage;
-        if round_path.name == "group-stage.json":
+        if "group-stage" in brackets.active_rounds:
             round_data = self.read_gs()
             for group in round_data.groups.values():
                 for round in group.rounds.values():
@@ -505,8 +540,8 @@ class Brackets(Storage):
                             composite_id = f"{match.group_id}-{match.round_id}-{match.match_id}"
                             matches[composite_id] = match
         else:
-            round_data = self.read_ms(round_path)
-            matches.update(round_data.matches)
+            for match in stages.playable(self.read_stage()):
+                matches[stages.match_key(match)] = match
 
         return matches
 
@@ -546,27 +581,14 @@ class Brackets(Storage):
                     match = match,
                 )
             else:
-                # its a main stage match.
-                self.update_ms_match(
-                    match = match,
-                )
+                # its a knockout stage match.
+                self.update_match(match=match)
 
             # and now we can send the results to discord.
             self.send_results(match, match_id)
             self.send_players_dashboard()
             return f"Given {team.name} win."
         return "Match is already completed"
-
-    def get_round_name(self, count: int) -> str:
-        """returns the round-name by teams-count"""
-        if count >= 16:
-            return f"round-of-{count}"
-        elif count == 8:
-            return "quarter-finals"
-        elif count == 4:
-            return "semi-finals"
-        else:
-            return "finals"
 
     def get_team(self, team_id: str) -> TeamSchema:
         """returns the full team information dict."""

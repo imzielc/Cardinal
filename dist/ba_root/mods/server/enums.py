@@ -84,6 +84,13 @@ class SeriesType(StrEnum):
         return mapping[self]
 
 
+class TournamentMode(StrEnum):
+    """how the teams are knocked out."""
+
+    SINGLE = "SINGLE_ELIMINATION"
+    DOUBLE = "DOUBLE_ELIMINATION"
+
+
 class Status(StrEnum):
     PENDING = "PENDING"
     IN_PROGRESS = "IN_PROGRESS"

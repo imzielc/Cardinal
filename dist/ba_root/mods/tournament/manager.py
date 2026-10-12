@@ -24,8 +24,43 @@ class Manager:
     def initialize(self, season_id: str):
         """initializes the manager."""
         self.season_id = season_id
+        if not int(season_id):
+            # no season is going on, nothing to load (and no junk season folder).
+            self.brackets = None
+            self.pending_matches.clear()
+            self.players.clear()
+            return
         self.brackets = Brackets(season_id=season_id)
+        # repairs a bracket a crash only saved partly, before the matches are loaded.
+        self.brackets.refresh()
         self.load_pending_matches()
+
+    def sync(self) -> None:
+        """picks up a season that was created, cancelled or moved on after the server started."""
+        from tournament import tournament
+
+        if self.active_match:
+            return
+        if tournament.active_season != self.season_id:
+            self.initialize(tournament.active_season)
+        elif self.brackets:
+            # a win given from the bot, or a new round, can change what is pending.
+            self.load_pending_matches()
+
+    def cancel(self) -> None:
+        """forgets the tournament, the season was cancelled. a match that is being played is stopped
+        and the server restarts, like it does when a match ends."""
+        was_playing = self.active_match is not None
+        self.active_match = None
+        self.pending_matches.clear()
+        self.players.clear()
+        self.ready_players.clear()
+        self.pause_players.clear()
+        self.brackets = None
+        self.season_id = "0"
+        if was_playing:
+            bascenev1.broadcastmessage("The tournament has been cancelled.")
+            self.end_tournament_session()
 
     def load_pending_matches(self):
         """load all pending matches from the database."""
@@ -77,6 +112,7 @@ class Manager:
 
     def handle_player_ready(self, account_id: str, uuid: str) -> dict:
         """handles the player ready event."""
+        self.sync()
         match_id = self.players.get(account_id, [None, None])[0]
         if not match_id:
             return {
@@ -154,11 +190,8 @@ class Manager:
             gs.groups[self.active_match.match.group_id].rounds[self.active_match.match.round_id].matches[self.active_match.match.match_id] = self.active_match.match
             self.brackets.commit_gs(gs)
         else:
-            # its a main stage match.
-            active_round_path = self.brackets.get_active_round_path()
-            ms = self.brackets.read_ms(active_round_path)
-            ms.matches[self.active_match.match.match_id] = self.active_match.match
-            self.brackets.commit_ms(ms, active_round_path)
+            # its a knockout stage match.
+            self.brackets.save_match(self.active_match.match)
 
     def handle_player_leave(self, account_id: str) -> None:
         """handles the player leaving."""
@@ -184,9 +217,7 @@ class Manager:
                 match = self.active_match.match,
             )
         else:
-            self.brackets.update_ms_match(
-                match = self.active_match.match,
-            )
+            self.brackets.update_match(match=self.active_match.match)
 
         self.brackets.send_results(self.active_match.match, self.active_match.key)
         self.brackets.send_players_dashboard()

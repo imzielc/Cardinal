@@ -73,7 +73,8 @@ class TournamentSession(DualTeamSession):
                 return
             team = msg.chooser.sessionteam
             identifier = player.get_account_id()
-            if team.name != manager.players[identifier][1]:
+            team_name = manager.players.get(identifier, [None, None])[1]
+            if team.name != team_name:
                 # if this is not the team of the player, we move him into his team.
                 msg.chooser.handlemessage(ChangeMessage("team", 1))
                 return
@@ -84,6 +85,10 @@ class TournamentSession(DualTeamSession):
 
     @override
     def _switch_to_score_screen(self, results: bascenev1.GameResults) -> None:
+        if manager.active_match is None:
+            # the tournament was cancelled in between, this is a normal session now.
+            return super()._switch_to_score_screen(results)
+
         from bascenev1lib.activity.drawscore import DrawScoreScreenActivity
         from bascenev1lib.activity.dualteamscore import (
             TeamVictoryScoreScreenActivity,

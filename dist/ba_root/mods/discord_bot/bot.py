@@ -7,7 +7,9 @@ from discord import Activity, ActivityType, Intents, Interaction, app_commands
 from discord.ext import commands
 import asyncio
 from discord_bot.client import GameClient
+from discord_bot.held_posts import HeldPosts
 from discord_bot.ui import (
+    ConfirmView,
     CaptainRegistrationModal,
     TeamInvitationView,
     SoloRegistrationModal,
@@ -15,8 +17,8 @@ from discord_bot.ui import (
 from traceback import format_exc
 from roles import roles
 from server import config
-from server.enums import Authority, Role, SeriesType, TournamentType, TournamentStage, TeamStatus
-from tournament import tournament
+from server.enums import Authority, Role, SeriesType, TournamentMode, TournamentType, TournamentStage, TeamStatus
+from tournament import posts, tournament
 from tournament.schema import SeasonSchema
 
 
@@ -35,6 +37,7 @@ class DiscordBot(commands.Bot):
         self.tree.on_error = self.on_app_cmd_error
         await self.add_cog(GeneralCommands(self))
         await self.add_cog(TournamentCommands(self))
+        await self.add_cog(HeldPosts(self))
 
     def _restore_invitations(self) -> None:
         """re-registers the invitation buttons of the pending teams, so they work after a restart."""
@@ -175,10 +178,18 @@ class TournamentCommands(
         super().__init__()
 
     @app_commands.command(name="create")
-    @app_commands.describe(type="Tournament Type", series="Series Type")
+    @app_commands.describe(
+        type="Tournament Type",
+        series="Series Type",
+        mode="Single or double elimination (default: single)",
+    )
     @require(authority=Authority.LEADER)
     async def create_season(
-        self, interaction: Interaction, type: TournamentType, series: SeriesType
+        self,
+        interaction: Interaction,
+        type: TournamentType,
+        series: SeriesType,
+        mode: TournamentMode = TournamentMode.SINGLE,
     ) -> None:
         """creates a tournament season"""
         if int(tournament.active_season):
@@ -192,11 +203,14 @@ class TournamentCommands(
         ist = timezone(timedelta(hours=5, minutes=30))
 
         schema = SeasonSchema(
-            series=series, type=type, created_at=datetime.now(ist).isoformat()
+            series=series,
+            type=type,
+            mode=mode,
+            created_at=datetime.now(ist).isoformat(),
         )
         tournament.create_season(schema=schema)
         await interaction.response.send_message(
-            f"The {type.lower()} season has been created with series: {series.lower()}"
+            f"The {type.lower()} season has been created with series: {series.lower()}, mode: {mode.lower().replace('_', ' ')}"
         )
         # check if the participant role exists
         role = discord.utils.get(interaction.guild.roles, name="Participant")
@@ -210,6 +224,61 @@ class TournamentCommands(
         season = tournament.get_season(season_id=tournament.active_season)
         season.participant_role_id = role.id
         tournament.update_season(season_id=tournament.active_season, season=season)
+
+    @app_commands.command(name="cancel")
+    @require(Authority.LEADER)
+    async def cancel_tournament(self, interaction: Interaction) -> None:
+        """cancels the active tournament"""
+        season_id = tournament.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament season opened currently.", ephemeral=True
+            )
+            return
+
+        season = tournament.get_season(season_id)
+
+        async def confirmed(confirm_interaction: Interaction) -> None:
+            # somebody else may have cancelled it while we were asking.
+            if tournament.active_season != season_id:
+                await confirm_interaction.response.edit_message(
+                    content="That tournament was already cancelled.", view=None
+                )
+                return
+            await confirm_interaction.response.edit_message(
+                content="Cancelling the tournament...", view=None
+            )
+
+            tournament.cancel_season(season_id)
+            # the held posts of this season will not go public.
+            cancelled = await asyncio.to_thread(posts.cancel_season, season_id)
+            staff = self.bot.get_cog("HeldPosts")
+            if staff:
+                for record in cancelled:
+                    await staff.update_staff_message(
+                        record, "cancelled (the tournament was cancelled)"
+                    )
+            # the game forgets the tournament, and stops a match that is being played.
+            await GameClient().send_action("tournament_cancel")
+
+            await confirm_interaction.followup.send(
+                f"Tournament season {season_id} has been cancelled by {confirm_interaction.user.mention}."
+            )
+
+        view = ConfirmView(
+            interaction.user.id,
+            confirmed,
+            confirm_label="Yes, cancel it",
+            abort_text="The tournament goes on.",
+        )
+        await interaction.response.send_message(
+            f"Cancel the active tournament (season {season_id}: {season.type.lower()}, "
+            f"{season.mode.lower().replace('_', ' ')}, stage {season.stage.lower().replace('_', ' ')})?\n"
+            "Registrations close, the held posts are thrown away and a match that is being played is stopped. "
+            "This cannot be undone.",
+            view=view,
+            ephemeral=True,
+        )
 
     @app_commands.command(name="register")
     async def register(self, interaction: Interaction) -> None:
@@ -355,7 +424,7 @@ class TournamentCommands(
         from tournament.brackets import Brackets
 
         brackets = Brackets(season_id=tournament.active_season)
-        if brackets.read_meta().active_round:
+        if brackets.read_meta().started:
             await interaction.response.send_message(
                 "The tournament is already started.",
                 ephemeral=True,
@@ -380,12 +449,22 @@ class TournamentCommands(
                 ephemeral=True,
             )
             return
+        mode = tournament.get_season(tournament.active_season).mode
+        is_groupstage = False
         try:
-            is_groupstage = brackets.generate_group_stage(teams=teams)
-        except AssertionError:
+            if mode == TournamentMode.DOUBLE:
+                # no group stage, everyone goes straight into the winners bracket.
+                brackets.generate_double_elimination(teams=teams)
+            else:
+                is_groupstage = brackets.generate_group_stage(teams=teams)
+        except (AssertionError, ValueError):
+            message = (
+                "Double elimination needs at least 4 teams."
+                if mode == TournamentMode.DOUBLE
+                else "The number of teams are either less than 4 or not divisible by 4."
+            )
             await interaction.followup.send(
-                "The number of teams are either less than 4 or not divisible by 4. The tournament cannot be started.",
-                ephemeral=True,
+                f"{message} The tournament cannot be started.", ephemeral=True
             )
             return
 
@@ -397,13 +476,14 @@ class TournamentCommands(
             gs = brackets.read_gs()
             for group_name in gs.groups:
                 # check if the group already has a role.
-                role = discord.utils.get(guild.roles, name=group_name)
+                role_name = f"Group {group_name}"
+                role = discord.utils.get(guild.roles, name=role_name)
                 if role:
                     # if it does, delete it.
                     await role.delete()
                 # now we create the role.
                 role = await guild.create_role(
-                    name=group_name, mentionable=True,
+                    name=role_name, mentionable=True,
                 )
                 # now we can add the role id to the group.
                 gs.groups[group_name].role_id = role.id
@@ -416,7 +496,17 @@ class TournamentCommands(
         for index, team in enumerate(teams, start=1):
             pings += f"{index}. `{team}`: <@{registration.teams[team].captain}>\n"
 
-        await interaction.followup.send(pings)
+        if posts.hold_enabled():
+            # held for the owners to review, then sent to the announcements channel.
+            await asyncio.to_thread(
+                posts.announce_lines,
+                tournament.active_season,
+                pings.rstrip("\n").split("\n"),
+                "Team captains list",
+                "captains",
+            )
+        else:
+            await interaction.followup.send(pings)
 
         # update the tournament season stage
         season = tournament.get_season(tournament.active_season)
