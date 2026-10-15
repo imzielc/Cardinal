@@ -2,13 +2,41 @@
 
 from __future__ import annotations
 
-from discord import ButtonStyle, Guild, Interaction, Role, ui
+from datetime import datetime, timezone
+
+import discord
+from discord import AllowedMentions, ButtonStyle, Guild, Interaction, Role, ui
 from discord.utils import get
 
 from tournament import tournament
+from tournament.link import link
 from tournament.registration import Registration
 
 TEAM_NAME_MAX_LENGTH = 40
+THREAD_ARCHIVE_MINUTES = 1440
+THREAD_NAME_SUFFIX_MAX = 6
+
+REGISTER_BUTTON_ID = "tournament;register"
+
+
+def thread_name(team_name: str, season_id: str) -> str:
+    """a stable, unique-ish name for the team's private thread."""
+    base = team_name.strip()[: 100 - THREAD_NAME_SUFFIX_MAX - 4]
+    return f"{base} · S{season_id}"
+
+
+def parse_date(value: str) -> int | None:
+    """turns an ISO date or datetime string into a unix timestamp, or None."""
+    if not value:
+        return None
+    try:
+        if "T" in value:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            dt = datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        return None
 
 
 class ConfirmView(ui.View):
@@ -55,7 +83,179 @@ def valid_team_name(name: str) -> bool:
     return bool(name.strip()) and ";" not in name
 
 
+def allowed_mentions_for(*members) -> AllowedMentions:
+    """only the given users may be pinged, nobody else."""
+    users = []
+    for member in members:
+        if member is None:
+            continue
+        uid = getattr(member, "id", None)
+        if uid is None:
+            continue
+        users.append(discord.Object(id=int(uid)))
+    return AllowedMentions(users=users, roles=False, everyone=False)
+
+
+def invitation_view(team, season_id: str, invite_text: str = "") -> "TeamInvitationView":
+    return TeamInvitationView(team_id=team.id, invite_text=invite_text, season_id=season_id)
+
+
+# ---- register panel ----
+
+
+class RegisterView(ui.LayoutView):
+    """the persistent registration panel. rebuilt from state every time it is shown."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+        self._build()
+
+    def _build(self) -> None:
+        self.clear_items()
+
+        season_id = tournament.active_season
+        season = tournament.get_season(season_id) if int(season_id) else None
+        open_ = season is not None and tournament.are_registrations_open
+
+        container = ui.Container(accent_color=discord.Color.blurple())
+        container.add_item(ui.TextDisplay("### 🏆  Tournament Registration"))
+
+        if season is None:
+            container.add_item(
+                ui.TextDisplay("No tournament is running right now. Check back later.")
+            )
+            container.add_item(ui.Separator())
+            button = ui.Button(
+                label="Register",
+                style=ButtonStyle.success,
+                emoji="📝",
+                custom_id=REGISTER_BUTTON_ID,
+                disabled=True,
+            )
+        else:
+            type_str = season.type.value.replace("_", " ").title()
+            series_str = season.series.value.replace("_", " ").title()
+            mode_str = season.mode.value.replace("_", " ").title()
+            container.add_item(
+                ui.TextDisplay(
+                    f"**Season** `{season_id}`\n"
+                    f"**Format** {type_str} • {series_str}\n"
+                    f"**Mode** {mode_str}"
+                )
+            )
+            container.add_item(ui.Separator())
+
+            if open_:
+                container.add_item(
+                    ui.TextDisplay(
+                        "Click the button below to sign up. "
+                        "You'll need your game account linked (`/account link`)."
+                    )
+                )
+                button = ui.Button(
+                    label="Register",
+                    style=ButtonStyle.success,
+                    emoji="📝",
+                    custom_id=REGISTER_BUTTON_ID,
+                )
+                button.callback = self.register_btn
+            else:
+                container.add_item(
+                    ui.TextDisplay("🔒 Registrations are currently closed.")
+                )
+                button = ui.Button(
+                    label="Register",
+                    style=ButtonStyle.success,
+                    emoji="📝",
+                    custom_id=REGISTER_BUTTON_ID,
+                    disabled=True,
+                )
+
+        container.add_item(ui.ActionRow(button))
+        self.add_item(container)
+
+    async def register_btn(self, interaction: Interaction) -> None:
+        season_id = tournament.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing right now.", ephemeral=True
+            )
+            return
+
+        if not tournament.are_registrations_open:
+            await interaction.response.send_message(
+                "Registrations are closed.", ephemeral=True
+            )
+            return
+
+        if not link.is_linked(str(interaction.user.id)):
+            await interaction.response.send_message(
+                "Link your game account first with `/account link`.", ephemeral=True
+            )
+            return
+
+        season_data = tournament.get_season(season_id=season_id)
+        size = season_data.type.count
+        if size > 1:
+            await interaction.response.send_modal(
+                CaptainRegistrationModal(season_id=season_id, size=size - 1)
+            )
+        else:
+            await interaction.response.send_modal(
+                SoloRegistrationModal(season_id=season_id)
+            )
+
+
+# ---- account status view ----
+
+
+class LinkedAccountView(ui.LayoutView):
+    """shows the game account bound to a discord id, using components v2."""
+
+    def __init__(self, data: dict, discord_id: str):
+        super().__init__(timeout=180)
+        self.data = data
+        self.discord_id = discord_id
+        self._build()
+
+    def _build(self) -> None:
+        self.clear_items()
+
+        tag = str(self.data.get("tag") or "Unknown")
+        account_id = str(self.data.get("id") or self.discord_id)
+
+        container = ui.Container()
+        container.add_item(ui.TextDisplay("### 🔗  Linked account"))
+        container.add_item(
+            ui.TextDisplay(
+                f"**Tag**  `{tag}`\n"
+                f"**Account ID**  `{account_id}`"
+            )
+        )
+        container.add_item(ui.Separator())
+
+        rows = []
+
+        created = parse_date(self.data.get("create_time", ""))
+        if created:
+            rows.append(f"📅  **Created**  <t:{created}:D>")
+
+        last = parse_date(self.data.get("last_active_day", ""))
+        if last:
+            rows.append(f"🟢  **Last seen**  <t:{last}:D>")
+
+        days = self.data.get("total_active_days")
+        if days is not None:
+            rows.append(f"📊  **Active days**  `{days}`")
+
+        if rows:
+            container.add_item(ui.TextDisplay("\n".join(rows)))
+
+        self.add_item(container)
+
+
 # solo registration modal.
+
 
 class SoloRegistrationModal(ui.Modal, title="Tournament Solo Registration."):
     """asks for team name."""
@@ -74,6 +274,12 @@ class SoloRegistrationModal(ui.Modal, title="Tournament Solo Registration."):
     async def on_submit(self, interaction: Interaction):
         registration = Registration(self.season_id)
 
+        if not link.is_linked(str(interaction.user.id)):
+            await interaction.response.send_message(
+                "Link your game account first with `/account link`.", ephemeral=True
+            )
+            return
+
         if registration.is_registered(str(interaction.user.id)):
             await interaction.response.send_message(
                 "You are already registered.", ephemeral=True
@@ -86,21 +292,19 @@ class SoloRegistrationModal(ui.Modal, title="Tournament Solo Registration."):
             )
             return
 
-        code = registration.generate_code()
-        success = registration.register(
+        team_id = registration.register(
             team_name=self.team_name.value,
             captain_discord_id=str(interaction.user.id),
-            captain_code=code,
         )
-        if success is None:
+        if team_id is None:
             await interaction.response.send_message(
-                "The name you have chosen is already taken. Please choose a different name.",
-                ephemeral=True,
+                "The name you have chosen is already taken.", ephemeral=True
             )
             return
-        if not success:
+        if not team_id:
             await interaction.response.send_message(
-                "You are already registered in this season.", ephemeral=True
+                "Couldn't register you. Make sure your account isn't on another team.",
+                ephemeral=True,
             )
             return
 
@@ -108,10 +312,9 @@ class SoloRegistrationModal(ui.Modal, title="Tournament Solo Registration."):
         if role:
             await interaction.user.add_roles(role)
         await interaction.response.send_message(
-            f"Registered as {interaction.user.display_name}! Join the game server and run `/verify {code}` to verify yourself. Your code is given below.",
+            f"You're registered as **{self.team_name.value}**! Join the game and run `/verify` to finish.",
             ephemeral=True,
         )
-        await interaction.followup.send(f"```{code}```", ephemeral=True)
 
 
 # registration modal for team-captain to input his  team-name and select team members.
@@ -138,10 +341,80 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
         )
         self.add_item(self.select)
 
+    async def _find_archived_thread(self, channel, name: str):
+        """looks for an archived private thread with this name in the channel."""
+        try:
+            async for thread in channel.archived_threads(limit=100, private=True):
+                if thread.name == name and thread.archived:
+                    return thread
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+        return None
+
+    async def _create_team_thread(self, interaction: Interaction, invited_members: list):
+        """returns the private thread for the team, reusing an archived one if it exists."""
+        channel = interaction.channel
+        if not hasattr(channel, "create_thread"):
+            return None
+
+        name = thread_name(self.team_name.value, self.season_id)
+
+        existing = await self._find_archived_thread(channel, name)
+        if existing is not None:
+            try:
+                if existing.locked:
+                    await existing.edit(archived=False, locked=False)
+                else:
+                    await existing.edit(archived=False)
+                await existing.send("**Team re-created.** Fresh invitation below.")
+                try:
+                    await existing.add_user(interaction.user)
+                except discord.HTTPException:
+                    pass
+                for member in invited_members:
+                    try:
+                        await existing.add_user(member)
+                    except discord.HTTPException:
+                        pass
+                return existing
+            except discord.HTTPException:
+                pass
+
+        try:
+            thread = await channel.create_thread(
+                name=name,
+                type=discord.ChannelType.private_thread,
+                invitable=False,
+                auto_archive_duration=THREAD_ARCHIVE_MINUTES,
+            )
+        except (discord.Forbidden, discord.HTTPException, TypeError):
+            return None
+
+        try:
+            await thread.add_user(interaction.user)
+        except discord.HTTPException:
+            try:
+                await thread.delete()
+            except discord.HTTPException:
+                pass
+            return None
+
+        for member in invited_members:
+            try:
+                await thread.add_user(member)
+            except discord.HTTPException:
+                pass
+        return thread
+
     async def on_submit(self, interaction: Interaction):
         registration = Registration(self.season_id)
 
-        # case: check if account-id is already registered
+        if not link.is_linked(str(interaction.user.id)):
+            await interaction.response.send_message(
+                "Link your game account first with `/account link`.", ephemeral=True
+            )
+            return
+
         if registration.is_registered(str(interaction.user.id)):
             await interaction.response.send_message(
                 "You are already registered.", ephemeral=True
@@ -157,29 +430,36 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
         invited_members = self.select.component.values
         if any(member.bot or member.id == interaction.user.id for member in invited_members):
             await interaction.response.send_message(
-                "You cannot invite bots or yourself, select your actual teammates.",
+                "You cannot invite bots or yourself.", ephemeral=True
+            )
+            return
+
+        unlinked = [m for m in invited_members if not link.is_linked(str(m.id))]
+        if unlinked:
+            names = ", ".join(m.mention for m in unlinked)
+            await interaction.response.send_message(
+                f"These players haven't linked yet: {names}.\nAsk them to run `/account link` and `/link <code>` in-game first.",
                 ephemeral=True,
             )
             return
-        code = registration.generate_code()
+
+        await interaction.response.defer(ephemeral=True)
 
         team_id = registration.register(
             team_name=self.team_name.value,
             captain_discord_id=str(interaction.user.id),
-            captain_code=code,
             invited_members=[str(member.id) for member in invited_members],
         )
 
         if team_id is None:
-            await interaction.response.send_message(
-                "The name you have chosen is already taken. Please choose a different name.",
-                ephemeral=True,
+            await interaction.followup.send(
+                "The name you have chosen is already taken.", ephemeral=True
             )
             return
 
         if not team_id:
-            await interaction.response.send_message(
-                "Failed to register your team! one of your teammates might already be registered.",
+            await interaction.followup.send(
+                "Failed to register. One of you might already be on another team.",
                 ephemeral=True,
             )
             return
@@ -188,46 +468,126 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
         if role:
             await interaction.user.add_roles(role)
 
-        view = TeamInvitationView(team_id=team_id)
+        thread = await self._create_team_thread(interaction, invited_members)
 
-        await interaction.channel.send(
-            f"{' '.join(member.mention for member in invited_members)}, You have been invited to join the team: `{self.team_name.value}` by {interaction.user.mention}",
-            view=view,
+        team = registration.get_team(team_id)
+        invite_text = (
+            f"{' '.join(member.mention for member in invited_members)}, "
+            f"you have been invited to join **{self.team_name.value}** by {interaction.user.mention}."
         )
-        await interaction.response.send_message(
-            f"Team **{self.team_name.value}** created! Invitation sent to your teammates.! Join the game server and run `/verify {code}` to verify yourself. Your code is given below.",
+        view = invitation_view(team, self.season_id, invite_text=invite_text)
+
+        target = thread if thread else interaction.channel
+        try:
+            await target.send(
+                view=view,
+                allowed_mentions=allowed_mentions_for(interaction.user, *invited_members),
+            )
+        except discord.HTTPException:
+            await interaction.followup.send(
+                "Team created, but the invitation message could not be sent.",
+                ephemeral=True,
+            )
+            return
+
+        if thread:
+            registration.set_thread(team_id, thread.id)
+
+        await interaction.followup.send(
+            f"Team **{self.team_name.value}** created! "
+            f"Teammates must accept the invite, then everyone runs `/verify` in-game.",
             ephemeral=True,
         )
-        await interaction.followup.send(f"```{code}```", ephemeral=True)
 
 
-# team invitation view for teammates to accept/reject
+# team invitation view for teammates to accept/reject (components v2).
 
 
 class TeamInvitationView(ui.LayoutView):
-    """accept or reject the invitation"""
+    """accept or reject a team invitation, rendered with components v2."""
 
-    def __init__(self, team_id: str):
+    def __init__(self, team_id: str, invite_text: str = "", season_id: str = ""):
         super().__init__(timeout=None)
-        
-        self.accept_button = ui.Button(
+        self.team_id = team_id
+        self.invite_text = invite_text
+        self.season_id = season_id
+        self._build()
+
+    def _build(self, team=None) -> None:
+        self.clear_items()
+
+        season_id = self.season_id or tournament.active_season
+        if team is None and int(season_id or "0"):
+            try:
+                team = Registration(season_id=season_id).get_team(self.team_id)
+            except Exception:
+                team = None
+
+        season = tournament.get_season(season_id) if int(season_id or "0") else None
+        size = season.type.count if season else 0
+
+        container = ui.Container()
+
+        if self.invite_text:
+            container.add_item(ui.TextDisplay(self.invite_text))
+            container.add_item(ui.Separator())
+
+        container.add_item(ui.TextDisplay(f"### 🎫  Team invitation — **{self.team_id}**"))
+
+        if team is None:
+            container.add_item(ui.TextDisplay("*This invitation is no longer active.*"))
+            self.add_item(container)
+            return
+
+        member_lines = []
+        for member in team.members:
+            if member.discord_id == team.captain:
+                member_lines.append(f"👑 <@{member.discord_id}>  —  *Captain*")
+            elif member.accepted:
+                member_lines.append(f"✅ <@{member.discord_id}>  —  *Joined*")
+            else:
+                member_lines.append(f"⏳ <@{member.discord_id}>  —  *Pending*")
+        container.add_item(ui.TextDisplay("\n".join(member_lines) or "*No members.*"))
+        container.add_item(ui.Separator())
+
+        meta = f"**Roster** {len(team.members)}/{size}" if size else f"**Roster** {len(team.members)}"
+        if team.expires_at > 0:
+            meta += f"   •   **Expires** <t:{int(team.expires_at)}:R>"
+        if team.status:
+            meta += f"   •   **Status** `{team.status}`"
+        container.add_item(ui.TextDisplay(meta))
+
+        accept = ui.Button(
             label="Accept",
             style=ButtonStyle.success,
-            custom_id=f"tiv;accept;{team_id}",
+            custom_id=f"tiv;accept;{self.team_id}",
+            emoji="✅",
         )
-        self.accept_button.callback = self.accept_btn
-
-        self.decline_button = ui.Button(
+        accept.callback = self.accept_btn
+        decline = ui.Button(
             label="Decline",
             style=ButtonStyle.danger,
-            custom_id=f"tiv;decline;{team_id}",
+            custom_id=f"tiv;decline;{self.team_id}",
+            emoji="❌",
         )
-        self.decline_button.callback = self.decline_btn
+        decline.callback = self.decline_btn
+        container.add_item(ui.ActionRow(accept, decline))
 
-        self.container = ui.ActionRow(self.accept_button, self.decline_button)
-        self.add_item(self.container)
+        self.add_item(container)
 
-    async def accept_btn(self, interaction: Interaction):
+    async def _refresh(self, interaction: Interaction) -> None:
+        self._build()
+        if interaction.message is None:
+            return
+        try:
+            await interaction.message.edit(
+                view=self,
+                allowed_mentions=AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            pass
+
+    async def accept_btn(self, interaction: Interaction) -> None:
         season_id = tournament.active_season
         registration = Registration(season_id=season_id)
         db = registration.read()
@@ -247,16 +607,24 @@ class TeamInvitationView(ui.LayoutView):
             )
             return
 
-        # invited members are in the players map from the start, so check their acceptance instead.
-        if registration.has_accepted(str(interaction.user.id)):
+        if registration.is_expired(team):
             await interaction.response.send_message(
-                "You have already accepted the invitation.", ephemeral=True
+                "This invitation has expired.", ephemeral=True
             )
             return
 
-        code = registration.generate_code()
+        if registration.has_accepted(str(interaction.user.id)):
+            await interaction.response.send_message(
+                "You have already accepted.", ephemeral=True
+            )
+            return
 
-        success = registration.accept(discord_id=str(interaction.user.id), code=code)
+        success = registration.accept(discord_id=str(interaction.user.id))
+        if success is None:
+            await interaction.response.send_message(
+                "This invitation has expired.", ephemeral=True
+            )
+            return
         if not success:
             await interaction.response.send_message(
                 "You are not registered in any team.", ephemeral=True
@@ -265,14 +633,18 @@ class TeamInvitationView(ui.LayoutView):
 
         role = participant_role(interaction.guild, season_id)
         if role:
-            await interaction.user.add_roles(role)
+            try:
+                await interaction.user.add_roles(role)
+            except discord.HTTPException:
+                pass
+
         await interaction.response.send_message(
-            f"You have joined the team! Join the game server and run `/verify {code}` to verify yourself. Your code is given below.",
+            "You've joined the team! Run `/verify` in the game to finish.",
             ephemeral=True,
         )
-        await interaction.followup.send(f"```{code}```", ephemeral=True)
+        await self._refresh(interaction)
 
-    async def decline_btn(self, interaction: Interaction):
+    async def decline_btn(self, interaction: Interaction) -> None:
         season_id = tournament.active_season
         registration = Registration(season_id=season_id)
         db = registration.read()
@@ -292,23 +664,36 @@ class TeamInvitationView(ui.LayoutView):
             )
             return
 
-        role = participant_role(interaction.guild, season_id)
-
-        # strip all the members of role.
-        for member in team.members:
-            discord_id = member.discord_id
-            user = interaction.guild.get_member(int(discord_id))
-            if role and user and role in user.roles:
-                await user.remove_roles(role)
-
-        # delete the team.
-        captain = registration.delete(team_id=team_id)
-
-        # a layout view cannot have a message content, replace the buttons with a text instead.
-        self.clear_items()
-        self.add_item(
-            ui.TextDisplay(
-                f"**Invitation Declined**, {interaction.user.mention} declined the invitation for team {team_id}. CAPTAIN: <@{captain}>"
+        if team.captain == str(interaction.user.id):
+            await interaction.response.send_message(
+                "You are the captain, you cannot decline your own team.", ephemeral=True
             )
+            return
+
+        role = participant_role(interaction.guild, season_id)
+        if role and role in interaction.user.roles:
+            try:
+                await interaction.user.remove_roles(role)
+            except discord.HTTPException:
+                pass
+
+        updated = registration.decline(str(interaction.user.id))
+
+        await interaction.response.send_message(
+            "You've declined the invitation.", ephemeral=True
         )
-        await interaction.response.edit_message(view=self)
+
+        if updated is None:
+            return
+
+        await self._refresh(interaction)
+
+        if isinstance(interaction.channel, discord.Thread):
+            try:
+                await interaction.channel.send(
+                    f"<@{updated.captain}> {interaction.user.mention} declined. "
+                    f"Use `/tournament invite` to invite a replacement.",
+                    allowed_mentions=allowed_mentions_for(interaction.user),
+                )
+            except discord.HTTPException:
+                pass

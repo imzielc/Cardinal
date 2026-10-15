@@ -2,7 +2,6 @@
 
 import json
 import random
-from pathlib import Path
 
 from server.enums import Status, TournamentMode, TournamentStage
 from server.storage import Storage

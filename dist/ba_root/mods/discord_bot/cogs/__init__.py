@@ -1,0 +1,1 @@
+"""slash command cogs for the discord bot."""

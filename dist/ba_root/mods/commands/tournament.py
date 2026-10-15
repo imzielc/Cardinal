@@ -2,6 +2,7 @@
 
 from server.clients import Client
 from tournament import tournament
+from tournament.link import link
 from tournament.manager import manager
 from tournament.registration import Registration
 
@@ -28,6 +29,7 @@ def ready(client: Client):
     if response["status"] == "error":
         client.error(response["message"])
 
+
 @on_command(name="/mpause")
 def pause(client: Client):
     """pauses the match if everyone agrees."""
@@ -48,26 +50,41 @@ def pause(client: Client):
     if response["status"] == "error":
         client.error(response["message"])
 
-@on_command(name="/verify", usage="/verify <code>")
-def verify(client: Client, args: list[str]):
-    """verifies the player in their team."""
+
+@on_command(name="/link", usage="/link <code>")
+def link_account(client: Client, args: list[str]):
+    """links this game account to your discord account."""
+    if not args:
+        client.error("Usage: /link <code>")
+        return
+    code = args[0]
+    discord_id = link.redeem(code, account_id=client.account_id)
+    if discord_id is None:
+        client.error("That code is invalid or has expired.")
+        return
+    client.success("Linked! You can now register in discord.")
+
+
+@on_command(name="/verify")
+def verify(client: Client):
+    """finishes the tournament registration for this game account."""
     season_id = tournament.active_season
     if not int(season_id):
         client.error("There is no tournament ongoing.")
         return
-    registration = Registration(season_id=season_id)
-    if registration.is_registered(client.account_id):
-        client.error("You are already registered.")
-        return
 
-    code = args[0]
+    registration = Registration(season_id=season_id)
     status = registration.verify(
-        code, client.account_id, device_uuid=client.public_uuid
+        account_id=client.account_id,
+        device_uuid=client.public_uuid,
     )
-    if status:
-        client.success("You have been successfully verified.")
+    if status is True:
+        client.success("You're verified!")
         return
-    if status is None:
-        client.error("The code is invalid.")
+    if status == "already":
+        client.error("You're already verified.")
         return
-    client.error("You have not registered from discord server yet.")
+    if status == "not_registered":
+        client.error("You're not on a tournament team.")
+        return
+    client.error("Something went wrong. Contact an admin.")

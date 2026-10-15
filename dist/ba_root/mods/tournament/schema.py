@@ -44,6 +44,9 @@ class TournamentSchema(BaseSchema):
     active_season: str = "0"
     registrations_status: bool = False
     seasons: dict[str, SeasonSchema] = field(default_factory=dict)
+    # the one registration panel the bot tracks (0 means none).
+    panel_channel_id: int = 0
+    panel_message_id: int = 0
 
 @dataclass
 class MatchTeamSchema(BaseSchema):
@@ -119,9 +122,11 @@ class BracketsMetaSchema(BaseSchema):
 class MemberSchema(BaseSchema):
     """schema for a member."""
     discord_id: str
-    code: str = ""
     account_id: str = ""
     device_uuid: str = ""
+    accepted: bool = False
+    # the unix time the invitation was sent (or last refreshed).
+    invited_at: float = 0.0
 
     def to_public(self) -> dict:
         """ masks the uuid and returns the dict. """
@@ -138,10 +143,32 @@ class TeamSchema(BaseSchema):
     captain: str
     status: TeamStatus = TeamStatus.IN_INVITATION
     members: list[MemberSchema] = field(default_factory=list)
+    # the private thread the invitation lives in (0 when there is none).
+    thread_id: int = 0
+    # the unix time the invitation expires (0 means no expiration).
+    expires_at: float = 0.0
 
 @dataclass
 class RegistrationSchema(BaseSchema):
     """schema for the registration."""
     teams: dict[str, TeamSchema] = field(default_factory=dict)
+    # keys can be a discord id or an account id, values are team ids.
     players: dict[str, str] = field(default_factory=dict)
-    codes: dict[str, str] = field(default_factory=dict)
+
+# ---- account linking ----
+
+@dataclass
+class LinkCodeSchema(BaseSchema):
+    """a short-lived code waiting to be redeemed in-game."""
+    discord_id: str
+    expires_at: float = 0.0
+
+@dataclass
+class LinkedSchema(BaseSchema):
+    """discord <-> game account links, independent of any season.
+
+    codes: pending link codes, keyed by the code itself.
+    links: permanent bindings, discord id -> game account id.
+    """
+    codes: dict[str, LinkCodeSchema] = field(default_factory=dict)
+    links: dict[str, str] = field(default_factory=dict)

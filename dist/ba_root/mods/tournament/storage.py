@@ -102,5 +102,26 @@ class Tournament(Storage):
         db.registrations_status = False
         self.commit(db)
 
+    # ---- the registration panel the bot keeps in sync ----
+
+    def get_panel(self) -> tuple[int, int]:
+        """the (channel_id, message_id) of the tracked register panel (0, 0 when none)."""
+        data = self.read()
+        return data.panel_channel_id, data.panel_message_id
+
+    def set_panel(self, channel_id: int, message_id: int) -> None:
+        """remembers where the register panel lives."""
+        data = self.read()
+        data.panel_channel_id = int(channel_id)
+        data.panel_message_id = int(message_id)
+        self.commit(data)
+
+    def clear_panel(self) -> None:
+        """forgets the tracked register panel."""
+        data = self.read()
+        data.panel_channel_id = 0
+        data.panel_message_id = 0
+        self.commit(data)
+
 
 tournament = Tournament()

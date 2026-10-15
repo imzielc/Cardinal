@@ -3,7 +3,7 @@
 - **Protocol version**: 36/editable (game versions below script version won't be allowed to join)
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-[![Discord](https://img.shields.io/badge/Discord-Join%20Chat-7289DA?style=for-the-badge&logo=discord&logoColor=white&labelColor=7289DA)](https://discord.gg/yrYqbSU7wT)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Chat-7289DA?style=for-the-badge&logo=discord&logoColor=white&labelColor=7289DA)](https://discord.gg/uGqhNWpWPY)
 
 ---
 
