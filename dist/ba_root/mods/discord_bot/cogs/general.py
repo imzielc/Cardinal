@@ -1,5 +1,6 @@
 """general slash commands."""
 
+import discord
 from discord import Interaction, app_commands
 from discord.ext import commands
 
@@ -55,7 +56,7 @@ class GeneralCommands(commands.Cog):
     @app_commands.command(name="admin")
     @app_commands.describe(user="the user to add/remove")
     @require(Authority.LEADER)
-    async def admin(self, interaction: Interaction, user) -> None:
+    async def admin(self, interaction: Interaction, user: discord.Member) -> None:
         """to add/remove a user to admins"""
         if roles.has_role(Role.ADMIN, user.id):
             roles.remove(Role.ADMIN, user.id)
@@ -71,7 +72,7 @@ class GeneralCommands(commands.Cog):
     @app_commands.command(name="owner")
     @app_commands.describe(user="the user to add/remove")
     @require(Authority.HOST)
-    async def owner(self, interaction: Interaction, user) -> None:
+    async def owner(self, interaction: Interaction, user: discord.Member) -> None:
         """to add/remove a user to owners"""
         if roles.has_role(Role.LEADER, user.id):
             roles.remove(Role.LEADER, user.id)

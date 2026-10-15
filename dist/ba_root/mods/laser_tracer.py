@@ -372,7 +372,7 @@ class LasorTracerGame(bs.TeamGameActivity[Player, Team]):
                                          enable_bomb=False,
                                          enable_pickup=False)
         if not self._solo_mode:
-            bs.timer(0.3, babase.Call(self._print_lives, player))
+            bs.timer(0.3, babase.CallStrict(self._print_lives, player))
 
         for icon in player.icons:
             icon.handle_player_spawned()
@@ -490,9 +490,9 @@ class LasorTracerGame(bs.TeamGameActivity[Player, Team]):
             })
 
     def create_laser(self) -> None:
-        bs.timer(6.0, babase.Call(self.LRlaser, True))
-        bs.timer(7.0, babase.Call(self.UDlaser, True))
-        bs.timer(30.0, babase.Call(self.create_laser))
+        bs.timer(6.0, babase.CallStrict(self.LRlaser, True))
+        bs.timer(7.0, babase.CallStrict(self.UDlaser, True))
+        bs.timer(30.0, babase.CallStrict(self.create_laser))
 
     def LRlaser(self, left: bool):
         ud_1_r = bs.newnode('region', attrs={'position': (-5, 2.6, 0), 'scale': (
@@ -529,7 +529,7 @@ class LasorTracerGame(bs.TeamGameActivity[Player, Team]):
         _rcombine.connectattr('output', ud_1_r, 'position')
         bs.timer(20.0, ud_1_r.delete)
         t = random.randrange(7, 13)
-        bs.timer(float(t), babase.Call(self.LRlaser, bool(random.randrange(0, 2))))
+        bs.timer(float(t), babase.CallStrict(self.LRlaser, bool(random.randrange(0, 2))))
 
     def UDlaser(self, up: bool):
         ud_2_r = bs.newnode('region', attrs={'position': (-3, 2.6, -6), 'scale': (
@@ -567,4 +567,4 @@ class LasorTracerGame(bs.TeamGameActivity[Player, Team]):
 
         bs.timer(17.0, ud_2_r.delete)
         t = random.randrange(6, 13)
-        bs.timer(float(t), babase.Call(self.UDlaser, bool(random.randrange(0, 2))))
+        bs.timer(float(t), babase.CallStrict(self.UDlaser, bool(random.randrange(0, 2))))
