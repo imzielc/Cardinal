@@ -6,9 +6,10 @@ import asyncio
 
 import discord
 from discord import Interaction, app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 from discord_bot.client import GameClient
+from discord_bot.events import cleanup_season
 from discord_bot.helpers import require
 from discord_bot.ui import (
     CaptainRegistrationModal,
@@ -18,6 +19,7 @@ from discord_bot.ui import (
     allowed_mentions_for,
     invitation_view,
     participant_role,
+    refresh_register_panel,
 )
 from server.enums import (
     Authority,
@@ -33,34 +35,6 @@ from tournament.registration import Registration
 from tournament.schema import SeasonSchema
 
 
-async def refresh_register_panel(bot: commands.Bot) -> None:
-    """re-renders the tracked register panel to match the current state. silent on any failure."""
-    channel_id, message_id = tournament.get_panel()
-    if not channel_id or not message_id:
-        return
-
-    try:
-        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
-    except discord.NotFound:
-        tournament.clear_panel()
-        return
-    except discord.HTTPException:
-        return
-
-    try:
-        message = await channel.fetch_message(message_id)
-    except discord.NotFound:
-        tournament.clear_panel()
-        return
-    except discord.HTTPException:
-        return
-
-    try:
-        await message.edit(view=RegisterView())
-    except discord.HTTPException:
-        pass
-
-
 class TournamentCommands(
     commands.GroupCog,
     group_name="tournament",
@@ -69,24 +43,6 @@ class TournamentCommands(
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         super().__init__()
-
-    async def cog_load(self) -> None:
-        self.hourly_refresh.start()
-
-    async def cog_unload(self) -> None:
-        self.hourly_refresh.cancel()
-
-    @tasks.loop(hours=1)
-    async def hourly_refresh(self) -> None:
-        """keeps the panel's numbers fresh — team counts change from user actions, not just admin ones."""
-        try:
-            await refresh_register_panel(self.bot)
-        except Exception:
-            pass
-
-    @hourly_refresh.before_loop
-    async def before_hourly_refresh(self) -> None:
-        await self.bot.wait_until_ready()
 
     async def _get_thread(self, thread_id: int):
         """returns the thread if reachable, otherwise None."""
@@ -185,6 +141,9 @@ class TournamentCommands(
             await confirm_interaction.response.edit_message(
                 content="Cancelling the tournament...", view=None
             )
+
+            # clean up roles and match threads before we lose the season id.
+            await cleanup_season(self.bot, season_id)
 
             tournament.cancel_season(season_id)
             cancelled = await asyncio.to_thread(posts.cancel_season, season_id)
@@ -298,6 +257,15 @@ class TournamentCommands(
             )
             return
 
+        # add the new member to the team role.
+        if team.role_id:
+            try:
+                team_role = interaction.guild.get_role(team.role_id)
+                if team_role:
+                    await user.add_roles(team_role)
+            except discord.HTTPException:
+                pass
+
         await interaction.response.send_message(
             f"Invited {user.mention} to team **{team.id}**.", ephemeral=True
         )
@@ -385,11 +353,22 @@ class TournamentCommands(
                         user = interaction.guild.get_member(int(member.discord_id))
                     except (TypeError, ValueError):
                         continue
-                    if user and role and role in user.roles:
+                    if user is None:
+                        continue
+                    if role and role in user.roles:
                         try:
                             await user.remove_roles(role)
                         except discord.HTTPException:
                             pass
+
+                # delete the team role.
+                if current.role_id:
+                    try:
+                        team_role = interaction.guild.get_role(current.role_id)
+                        if team_role:
+                            await team_role.delete()
+                    except discord.HTTPException:
+                        pass
 
                 if thread is not None:
                     try:
@@ -411,6 +390,15 @@ class TournamentCommands(
                 if role and role in interaction.user.roles:
                     try:
                         await interaction.user.remove_roles(role)
+                    except discord.HTTPException:
+                        pass
+
+                # remove from the team role.
+                if current.role_id:
+                    try:
+                        team_role = interaction.guild.get_role(current.role_id)
+                        if team_role and team_role in interaction.user.roles:
+                            await interaction.user.remove_roles(team_role)
                     except discord.HTTPException:
                         pass
 

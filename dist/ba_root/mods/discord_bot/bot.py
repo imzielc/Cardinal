@@ -1,5 +1,6 @@
 """bot.py — entry point. wires up the cogs and runs the client."""
 
+import asyncio
 import logging
 from traceback import format_exc
 
@@ -10,6 +11,7 @@ from discord_bot.cogs.account import AccountCommands
 from discord_bot.cogs.general import GeneralCommands
 from discord_bot.cogs.invitation_watcher import TeamInvitationWatcher
 from discord_bot.cogs.tournament import TournamentCommands
+from discord_bot.events import EventReceiver
 from discord_bot.held_posts import HeldPosts
 from discord_bot.ui import RegisterView, TeamInvitationView
 from server import config
@@ -27,11 +29,15 @@ class DiscordBot(commands.Bot):
             intents=intents,
             owner_id=config.discord.owner_id,
         )
+        self._events: EventReceiver | None = None
 
     async def setup_hook(self) -> None:
         self._restore_invitations()
         # the registration panel's button must keep working after a restart.
         self.add_view(RegisterView())
+        # start listening for game-side events.
+        self._events = EventReceiver(self, asyncio.get_running_loop())
+        self._events.start()
         self.tree.on_error = self.on_app_cmd_error
         await self.add_cog(GeneralCommands(self))
         await self.add_cog(AccountCommands(self))
@@ -65,6 +71,13 @@ class DiscordBot(commands.Bot):
             self.tree.clear_commands(guild=guild)
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
+
+    async def close(self) -> None:
+        """stop the event listener before the bot shuts down."""
+        if self._events:
+            self._events.shutdown()
+            self._events = None
+        await super().close()
 
 
 if __name__ == "__main__":

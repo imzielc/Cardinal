@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import functools
 import os
@@ -114,10 +115,8 @@ def launch(self) -> None:
     # UPDATE: uv is now installed by the installer.
     uv_path = shutil.which("uv")
 
-    # check if discord.py is installed.
-    try:
-        import discord
-    except ImportError:
+    # check whether discord.py is importable, without actually importing it.
+    if importlib.util.find_spec("discord") is None:
         # quietly install it.
         subprocess.run([uv_path, "add", "discord.py"], check=True)
 

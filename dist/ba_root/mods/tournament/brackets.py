@@ -4,6 +4,7 @@ import json
 import random
 
 from server.enums import Status, TournamentMode, TournamentStage
+from server.notify import send_event
 from server.storage import Storage
 from tournament import stages
 from tournament.storage import SEASONS_DIR
@@ -29,6 +30,23 @@ class Brackets(Storage):
         self.registration = Registration(self.season_id)
         if not self.path.exists():
             self.commit_meta(BracketsMetaSchema())
+
+    def _fire_round_event(self) -> None:
+        """tells the bot that a new set of matches is playable, so it can refresh threads."""
+        try:
+            matches = self.list_matches()
+        except Exception:
+            return
+        payload = []
+        for key, m in matches.items():
+            if m.is_bye:
+                continue
+            payload.append({
+                "key": key,
+                "team1": m.teams[0].name or "TBD",
+                "team2": m.teams[1].name or "TBD",
+            })
+        send_event("round_started", season_id=self.season_id, matches=payload)
 
     def generate_group_stage(self, teams: list) -> None | bool:
         """generates the group stage brackets."""
@@ -87,6 +105,8 @@ class Brackets(Storage):
         brackets.active_rounds = ["group-stage"]
         brackets.total_rounds += 1
         self.commit_meta(brackets)
+
+        self._fire_round_event()
 
         return True
 
@@ -183,6 +203,9 @@ class Brackets(Storage):
         self.send_groupstage_brackets()
         self.send_group_stage_standings()
 
+        if all_groups_round_completed:
+            self._fire_round_event()
+
     # ---- the knockout stage (single and double elimination) ----
 
     def read_stage(self) -> stages.Stage:
@@ -224,6 +247,7 @@ class Brackets(Storage):
         self.commit_stage(stage)
 
         brackets = self.read_meta()
+        old_rounds = list(brackets.active_rounds)
         brackets.mode = mode
         brackets.started = True
         brackets.status = Status.IN_PROGRESS
@@ -231,6 +255,9 @@ class Brackets(Storage):
         brackets.total_rounds += sum(len(rounds) for rounds in stage.values())
         self.commit_meta(brackets)
         self.send_stage_brackets()
+
+        if old_rounds != brackets.active_rounds:
+            self._fire_round_event()
 
     def refresh(self) -> None:
         """settles the stage again, this repairs a stage a crash only saved partly."""
@@ -243,8 +270,12 @@ class Brackets(Storage):
         before = self.snapshot(stage)
         stages.settle(stage, brackets.mode)
         self.commit_stage(stage, before)
+        old_rounds = list(brackets.active_rounds)
         brackets.active_rounds = stages.active_rounds(stage)
         self.commit_meta(brackets)
+
+        if old_rounds != brackets.active_rounds:
+            self._fire_round_event()
 
     def generate_double_elimination(self, teams: list) -> bool:
         """generates the double elimination bracket for the teams (any number, at least 4)."""
@@ -270,12 +301,16 @@ class Brackets(Storage):
         self.commit_stage(stage, before)
 
         completed, placements = stages.outcome(stage, brackets.mode)
+        old_rounds = list(brackets.active_rounds)
         brackets.active_rounds = stages.active_rounds(stage)
         if completed:
             brackets.status = Status.COMPLETED
             brackets.placements = placements
         self.commit_meta(brackets)
         self.send_stage_brackets()
+
+        if old_rounds != brackets.active_rounds:
+            self._fire_round_event()
 
         if completed:
             self.announce_tournament_completion()
@@ -303,7 +338,7 @@ class Brackets(Storage):
                     team_name = team.name
                     if team_name and team_name not in stats:
                         stats[team_name] = {
-                            "id": team_name, # the team name is the id itself for uniqueness.
+                            "id": team_name,  # the team name is the id itself for uniqueness.
                             "wins": 0,
                             "loses": 0,
                             "points": 0,
@@ -431,19 +466,22 @@ class Brackets(Storage):
         db.active_season = "0"
         tournament.commit(db)
 
+        # the bot closes every match thread and clears the season's roles when it hears this.
+        send_event("tournament_completed", season_id=self.season_id)
+
         # TODO: announce completion with winners.
 
     def announce_match_start(self, team1: str, team2: str) -> None:
         """announces the match start in discord."""
         from tournament import tournament
-        data = {
-            "type": "match-announcement",
-            "season_id": self.season_id,
-            "participant_role_id": tournament.get_season(self.season_id).participant_role_id,
-            "team1": team1,
-            "team2": team2,
-        }
-        runner.run(data=data)
+        season = tournament.get_season(self.season_id)
+        send_event(
+            "match_announcement",
+            season_id=self.season_id,
+            team1=team1,
+            team2=team2,
+            participant_role_id=season.participant_role_id if season else 0,
+        )
 
     def send_stage_brackets(self) -> None:
         """sends the brackets of the knockout stage, the image depends on the mode."""
@@ -573,7 +611,7 @@ class Brackets(Storage):
             team = match.teams[team_index]
             team.score = series_length * 4
             team.series = series_length
-            
+
             if match.group_id:
                 # its a group stage match.
                 self.update_gs_match(

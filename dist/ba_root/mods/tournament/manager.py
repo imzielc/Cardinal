@@ -3,6 +3,7 @@ import os
 import bascenev1
 
 from server.enums import Status
+from server.notify import send_event
 from tournament.brackets import Brackets
 from tournament.schema import MatchSchema, PendingMatchSchema
 
@@ -211,6 +212,13 @@ class Manager:
             return
 
         self.save_score()
+
+        # tell the bot the match is over, so it can close the match's thread.
+        send_event(
+            "match_ended",
+            season_id=self.season_id,
+            key=self.active_match.key,
+        )
 
         if self.active_match.match.group_id:
             self.brackets.update_gs_match(

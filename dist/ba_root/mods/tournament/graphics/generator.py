@@ -2009,9 +2009,9 @@ def generate_double_elimination(season_dir: Path, webhook: Webhook) -> None:
         )
 
 
-def generate_player_registration(name: str, webhook: Webhook):
+def generate_player_registration(name: str, webhook: Webhook, mention: str | None = None):
     """
-    Generates a registration card.
+    Generates a registration card. mention (when given) is the ping that goes with the card.
     """
     card_w, card_h = 800, 380
 
@@ -2042,12 +2042,10 @@ def generate_player_registration(name: str, webhook: Webhook):
         center_text(d, center_x, top_y + 20, "SUCCESSFULLY REGISTERED", main_title_font, CYAN)
         top_y += 50
 
-    # Main Card Container Frame
     box_w, box_h = 720, 210
     box_coords = (center_x - box_w // 2, top_y, center_x + box_w // 2, top_y + box_h)
     draw_rounded_rect(img, box_coords, radius=14, fill=(8, 15, 35, 230), outline=(*CYAN, 200), width=2)
 
-    # Confirmation Subtitle
     sub_font = get_font(18, bold=True)
     center_text(d, center_x, top_y + 35, "TOURNAMENT REGISTRATION CONFIRMED", sub_font, CYAN)
 
@@ -2061,7 +2059,7 @@ def generate_player_registration(name: str, webhook: Webhook):
         img.convert("RGB").save(image_buffer, "PNG", optimize=True)
         image_buffer.seek(0)
         files = webhook.create("registration-card.png", image_buffer)
-        webhook.send("registrations", f"player-registration-{player_name}", files)
+        webhook.send("registrations", f"player-registration-{player_name}", files, content=mention)
 
 
 if __name__ == "__main__":
@@ -2075,7 +2073,7 @@ if __name__ == "__main__":
     SEASON_DIR = GRAPHICS_DIR.parent / "seasons" / season_id
 
     if data["type"] == "registration":
-        generate_player_registration(data["name"], webhook)
+        generate_player_registration(data["name"], webhook, mention=data.get("mention"))
 
     elif data["type"] == "match-announcement":
         participant_role_id = data["participant_role_id"]

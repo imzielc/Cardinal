@@ -55,6 +55,8 @@ class MatchTeamSchema(BaseSchema):
     name: str | None = None
     score: int = 0
     series: int = 0
+    # double elimination: a slot is filled by the result of another match, "W:<bracket>:<round>:<match>"
+    # for its winner and "L:..." for its loser. a bye slot never gets a team.
     source: str | None = None
     bye: bool = False
 
@@ -69,6 +71,7 @@ class MatchSchema(BaseSchema):
     group_id: str | None = None
     round_id: str | None = None
     last_scores: list[int] = field(default_factory=lambda : [0, 0])
+    # double elimination: "winners", "losers" or "grand-final", and whether a bye decided the match.
     bracket: str | None = None
     is_bye: bool = False
 
@@ -85,6 +88,7 @@ class RoundSchema(BaseSchema):
     """schema for a round."""
     matches: dict[str, MatchSchema] = field(default_factory=dict)
     status: Status = Status.PENDING
+    # the position of the round in its bracket (1 is the first), the round ids are not always numbers.
     number: int = 0
 
 @dataclass
@@ -107,9 +111,11 @@ class BracketsMetaSchema(BaseSchema):
     """schema for the brackets meta."""
     mode: TournamentMode = TournamentMode.SINGLE
     started: bool = False
+    # the rounds that can be played right now, as "group-stage" or "<bracket>/<round>"
     active_rounds: list[str] = field(default_factory=list)
     total_rounds: int = 0
     status: Status = Status.PENDING
+    # {"rank": 1, "team": "name"}, filled in when the tournament is over.
     placements: list[dict] = field(default_factory=list)
 
 @dataclass
@@ -119,6 +125,7 @@ class MemberSchema(BaseSchema):
     account_id: str = ""
     device_uuid: str = ""
     accepted: bool = False
+    # the unix time the invitation was sent (or last refreshed).
     invited_at: float = 0.0
 
     def to_public(self) -> dict:
@@ -136,15 +143,20 @@ class TeamSchema(BaseSchema):
     captain: str
     status: TeamStatus = TeamStatus.IN_INVITATION
     members: list[MemberSchema] = field(default_factory=list)
+    # the private thread the invitation lives in (0 when there is none).
     thread_id: int = 0
+    # the unix time the invitation expires (0 means no expiration).
     expires_at: float = 0.0
     # discord_id -> unix time they declined. used to cool down re-invites.
     declined: dict[str, float] = field(default_factory=dict)
+    # the discord role that mentions this team (0 when not set, e.g. solo teams).
+    role_id: int = 0
 
 @dataclass
 class RegistrationSchema(BaseSchema):
     """schema for the registration."""
     teams: dict[str, TeamSchema] = field(default_factory=dict)
+    # keys can be a discord id or an account id, values are team ids.
     players: dict[str, str] = field(default_factory=dict)
 
 # ---- account linking ----
@@ -164,3 +176,15 @@ class LinkedSchema(BaseSchema):
     """
     codes: dict[str, LinkCodeSchema] = field(default_factory=dict)
     links: dict[str, str] = field(default_factory=dict)
+
+# ---- match threads (bot side) ----
+
+@dataclass
+class MatchThreadsSchema(BaseSchema):
+    """the match threads the bot created for the current round of a season.
+
+    key is the match's stable id (same format as Brackets.list_matches keys),
+    value is the thread id.
+    """
+    season_id: str = ""
+    threads: dict[str, int] = field(default_factory=dict)

@@ -40,6 +40,34 @@ def parse_date(value: str) -> int | None:
         return None
 
 
+async def refresh_register_panel(bot) -> None:
+    """re-renders the tracked register panel to match the current state. silent on any failure."""
+    channel_id, message_id = tournament.get_panel()
+    if not channel_id or not message_id:
+        return
+
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    except discord.NotFound:
+        tournament.clear_panel()
+        return
+    except discord.HTTPException:
+        return
+
+    try:
+        message = await channel.fetch_message(message_id)
+    except discord.NotFound:
+        tournament.clear_panel()
+        return
+    except discord.HTTPException:
+        return
+
+    try:
+        await message.edit(view=RegisterView())
+    except discord.HTTPException:
+        pass
+
+
 class ConfirmView(ui.View):
     """asks the user to confirm something that cannot be undone, only that user can answer."""
 
@@ -99,6 +127,30 @@ def allowed_mentions_for(*members) -> AllowedMentions:
 
 def invitation_view(team, season_id: str, invite_text: str = "") -> "TeamInvitationView":
     return TeamInvitationView(team_id=team.id, invite_text=invite_text, season_id=season_id)
+
+
+async def create_team_role(guild: Guild, team_name: str, member_ids: list[int]) -> int:
+    """creates the team's role, adds everyone to it, returns the id (0 on failure)."""
+    if guild is None:
+        return 0
+    try:
+        role = await guild.create_role(
+            name=team_name[:100],
+            mentionable=True,
+            reason=f"Tournament team role for {team_name}",
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        return 0
+
+    for mid in member_ids:
+        try:
+            member = guild.get_member(mid) or await guild.fetch_member(mid)
+            if member:
+                await member.add_roles(role)
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            pass
+
+    return role.id
 
 
 # ---- register panel ----
@@ -328,6 +380,7 @@ class SoloRegistrationModal(ui.Modal, title="Tournament Solo Registration."):
             f"You're registered as **{self.team_name.value}**! Join the game and run `/verify` to finish.",
             ephemeral=True,
         )
+        await refresh_register_panel(interaction.client)
 
 
 # registration modal for team-captain to input his  team-name and select team members.
@@ -481,6 +534,13 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
         if role:
             await interaction.user.add_roles(role)
 
+        member_ids = [interaction.user.id] + [m.id for m in invited_members]
+        team_role_id = await create_team_role(
+            interaction.guild, self.team_name.value, member_ids
+        )
+        if team_role_id:
+            registration.set_role(team_id, team_role_id)
+
         thread = await self._create_team_thread(interaction, invited_members)
 
         team = registration.get_team(team_id)
@@ -511,6 +571,7 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
             f"Teammates must accept the invite, then everyone runs `/verify` in-game.",
             ephemeral=True,
         )
+        await refresh_register_panel(interaction.client)
 
 
 # team invitation view for teammates to accept/reject (components v2).
@@ -690,6 +751,14 @@ class TeamInvitationView(ui.LayoutView):
             except discord.HTTPException:
                 pass
 
+        if team.role_id:
+            try:
+                team_role = interaction.guild.get_role(team.role_id)
+                if team_role and team_role in interaction.user.roles:
+                    await interaction.user.remove_roles(team_role)
+            except discord.HTTPException:
+                pass
+
         updated = registration.decline(str(interaction.user.id))
 
         await interaction.response.send_message(
@@ -700,6 +769,7 @@ class TeamInvitationView(ui.LayoutView):
             return
 
         await self._refresh(interaction)
+        await refresh_register_panel(interaction.client)
 
         if isinstance(interaction.channel, discord.Thread):
             try:

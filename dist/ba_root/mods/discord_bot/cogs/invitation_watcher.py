@@ -51,33 +51,38 @@ class TeamInvitationWatcher(commands.Cog):
             except discord.HTTPException:
                 channel = None
 
-        if channel is not None and season is not None and season.participant_role_id:
-            guild = getattr(channel, "guild", None)
-            if guild is not None:
-                role = guild.get_role(season.participant_role_id)
-                if role is not None:
-                    for member in team.members:
-                        try:
-                            user = guild.get_member(int(member.discord_id))
-                        except (TypeError, ValueError):
-                            continue
-                        if user and role in user.roles:
-                            try:
-                                await user.remove_roles(role)
-                            except discord.HTTPException:
-                                pass
+        # reach the guild through the thread, or fall back to the first guild we know.
+        guild = getattr(channel, "guild", None) if channel else None
+        if guild is None and self.bot.guilds:
+            guild = self.bot.guilds[0]
 
+        if season is not None and season.participant_role_id and guild is not None:
+            role = guild.get_role(season.participant_role_id)
+            if role is not None:
+                for member in team.members:
+                    try:
+                        user = guild.get_member(int(member.discord_id))
+                    except (TypeError, ValueError):
+                        continue
+                    if user and role in user.roles:
+                        try:
+                            await user.remove_roles(role)
+                        except discord.HTTPException:
+                            pass
+
+        # delete the team role if it exists.
+        if team.role_id and guild is not None:
+            team_role = guild.get_role(team.role_id)
+            if team_role:
+                try:
+                    await team_role.delete()
+                except discord.HTTPException:
+                    pass
+
+        # the attempt is dead, throw its thread away.
         if channel is not None:
             try:
-                await channel.send(
-                    f"The invitation for team **{team.id}** has expired. "
-                    f"<@{team.captain}>, contact an admin if you still want to play.",
-                    allowed_mentions=allowed_mentions_for(),
-                )
-            except discord.HTTPException:
-                pass
-            try:
-                await channel.edit(archived=True, locked=True)
+                await channel.delete()
             except discord.HTTPException:
                 pass
 

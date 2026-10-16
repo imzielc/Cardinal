@@ -2,6 +2,7 @@ import time
 
 from server import config
 from server.enums import TeamStatus
+from server.notify import send_event
 from server.storage import Storage
 from tournament.link import link
 from tournament.storage import SEASONS_DIR
@@ -30,13 +31,16 @@ class Registration(Storage):
         self.bootstrap()
 
     def read(self) -> RegistrationSchema:
+        """reads the registration."""
         data = super().read()
         return RegistrationSchema.from_dict(data)
 
     def commit(self, data: RegistrationSchema) -> None:
+        """commits the registration."""
         super().commit(data.to_dict())
 
     def bootstrap(self):
+        """creates the file if not already existing."""
         if not self.path.exists():
             self.commit(RegistrationSchema())
 
@@ -58,6 +62,7 @@ class Registration(Storage):
         return False
 
     def get_team(self, team_id: str) -> TeamSchema | None:
+        """returns a team by its id."""
         return self.read().teams.get(team_id)
 
     def team_of(self, discord_id: str) -> TeamSchema | None:
@@ -69,15 +74,17 @@ class Registration(Storage):
 
     @staticmethod
     def is_expired(team: TeamSchema) -> bool:
+        """whether the invitation of a team has run out."""
         if team.expires_at <= 0:
             return False
         return time.time() > team.expires_at
 
     def expired_teams(self) -> list[TeamSchema]:
+        """all the teams whose invitation has expired."""
         return [team for team in self.read().teams.values() if self.is_expired(team)]
 
     def expire_team(self, team_id: str) -> TeamSchema | None:
-        """removes an expired team and every trace of its members."""
+        """removes an expired team, and any traces of its members. returns the removed team."""
         db = self.read()
         team = db.teams.get(team_id)
         if not team:
@@ -120,6 +127,7 @@ class Registration(Storage):
         invited_members = [str(x) for x in invited_members]
 
         if captain_discord_id in invited_members or len(set(invited_members)) != len(invited_members):
+            # a person cannot be in a team twice.
             return False
 
         size = len(invited_members) + 1
@@ -128,6 +136,7 @@ class Registration(Storage):
         accounts = {}
         for did in everyone:
             if self.is_registered(did):
+                # if any of them is registered, decline it.
                 return False
             aid = link.account_of(did)
             if not aid:
@@ -140,8 +149,11 @@ class Registration(Storage):
             expire_seconds = _default_expire_seconds()
 
         db = self.read()
+        # case: team-name already exists
         if team_name in db.teams:
             return None
+        # team_id = f"team-{len(db['teams']) + 1}"
+        # we use team-name as team-id
         team_id = team_name
         now = time.time()
 
@@ -155,10 +167,12 @@ class Registration(Storage):
             for did in everyone
         ]
 
+        # saving in players dict will help us do team lookup and verification much faster.
         for member in members:
             db.players[member.discord_id] = team_id
             db.players[member.account_id] = team_id
 
+        # solo has nothing to accept, no point in a timer either.
         expires_at = now + expire_seconds if size > 1 and expire_seconds > 0 else 0.0
 
         db.teams[team_id] = TeamSchema(
@@ -170,6 +184,16 @@ class Registration(Storage):
         )
         self.commit(db)
         return team_id
+
+    def set_role(self, team_id: str, role_id: int) -> bool:
+        """remembers the discord role that mentions this team."""
+        db = self.read()
+        team = db.teams.get(team_id)
+        if not team:
+            return False
+        team.role_id = int(role_id)
+        self.commit(db)
+        return True
 
     def add_member(self, team_id: str, discord_id: str) -> bool:
         """adds a replacement member to an existing team."""
@@ -194,21 +218,26 @@ class Registration(Storage):
         ))
         db.players[discord_id] = team_id
         db.players[aid] = team_id
+        # adding a member brings the team back to the invitation stage.
         if team.status != TeamStatus.IN_INVITATION:
             team.status = TeamStatus.IN_INVITATION
         self.commit(db)
         return True
 
     def delete(self, team_id: str) -> str:
-        """removes the team entirely. returns the captain's discord id, or "" when missing."""
+        """deletes the team when someone declines the invitation."""
         db = self.read()
         team = db.teams.get(team_id)
         if not team:
             return ""
+
         for member in team.members:
-            db.players.pop(member.discord_id, None)
-            if member.account_id:
-                db.players.pop(member.account_id, None)
+            account_id = member.account_id
+            if account_id in db.players:
+                del db.players[account_id]
+            discord_id = member.discord_id
+            if discord_id in db.players:
+                del db.players[discord_id]
         captain = team.captain
         del db.teams[team_id]
         self.commit(db)
@@ -264,6 +293,7 @@ class Registration(Storage):
         """marks an invited member as accepted. None when the invitation expired."""
         discord_id = str(discord_id)
         db = self.read()
+        # lookup team id from players map
         team_id = db.players.get(discord_id)
         if not team_id:
             return False
@@ -277,7 +307,10 @@ class Registration(Storage):
             if member.discord_id == discord_id:
                 member.accepted = True
                 member.invited_at = time.time()
+
+                # check if everyone on the team has accepted the invitation.
                 if all(m.accepted for m in team.members):
+                    # update the team status
                     team.status = TeamStatus.UNVERIFIED
                 self.commit(db)
                 return True
@@ -300,22 +333,31 @@ class Registration(Storage):
 
         for member in team.members:
             if member.account_id == account_id:
+                # case: the guy is already verified
                 if member.device_uuid:
                     return "already"
                 member.device_uuid = device_uuid
+                # save in players map for avoiding duplications.
+                # check if everyone on the team has verified.
                 if all(m.device_uuid for m in team.members):
+                    # update the team status
                     team.status = TeamStatus.VERIFIED
+                    # tell the bot first, so it can refresh the panel and archive the thread.
+                    send_event("team_verified", season_id=self.season_id, team_id=team_id)
+                    # the mention is the team role for team seasons, or the captain for solos.
+                    mention = f"<@&{team.role_id}>" if team.role_id else f"<@{team.captain}>"
                     runner.run(data={
                         "type": "registration",
                         "name": team_id,
                         "season_id": self.season_id,
+                        "mention": mention,
                     })
                 self.commit(db)
                 return True
         return "not_registered"
 
     def change_uuid(self, discord_id: str, new_uuid: str) -> bool:
-        """changes the device uuid of a member."""
+        """changes the uuid of a player"""
         db = self.read()
         team_id = db.players.get(str(discord_id))
         if not team_id:

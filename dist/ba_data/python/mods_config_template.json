@@ -11,8 +11,10 @@
         "enable": false,
         "token": "ENTER-YOUR-BOT-TOKEN-HERE",
         "port": 9001,
+        "bot_port": 9002,
         "owner_id": 0,
         "staff_channel_id": 0,
+        "brackets_channel_id": 0,
         "hold_hours": 3,
         "invite_expire_hours": 24,
         "webhooks": {
