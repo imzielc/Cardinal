@@ -429,6 +429,12 @@ class TournamentCommands(
     @require(Authority.LEADER)
     async def registrations(self, interaction: Interaction, option: bool) -> None:
         """open/close the registrations"""
+        if not int(tournament.active_season):
+            await interaction.response.send_message(
+                "There is no tournament season opened currently.", ephemeral=True
+            )
+            return
+
         if option:
             if tournament.are_registrations_open:
                 await interaction.response.send_message(
