@@ -89,7 +89,7 @@ playlist_code = 628324
 
 # Whether to shuffle the playlist or play its games in designated
 # order.
-#playlist_shuffle = true
+playlist_shuffle = false
 
 # If true, keeps team sizes equal by disallowing joining the largest
 # team (teams mode only).

@@ -60,7 +60,7 @@ def link_account(client: Client, args: list[str]):
     code = args[0]
     discord_id = link.redeem(code, account_id=client.account_id)
     if discord_id is None:
-        client.error("That code is invalid or has expired.")
+        client.error("That code is invalid or has expired, use /link on discord to get a new one.")
         return
     client.success("Linked! You can now register in discord.")
 
@@ -85,6 +85,16 @@ def verify(client: Client):
         client.error("You're already verified.")
         return
     if status == "not_registered":
-        client.error("You're not on a tournament team.")
+        # give a reason instead of a blunt "not registered".
+        discord_id = link.discord_of(client.account_id)
+        if discord_id is None:
+            client.error("This game account isn't linked. Run /account link in discord.")
+            return
+        team = registration.team_of(discord_id)
+        if team is None:
+            client.error("You're not on a tournament team. Register in discord first.")
+            return
+        # on a team, but with a different account.
+        client.error("Your discord is on a team with a different account. Contact an admin.")
         return
     client.error("Something went wrong. Contact an admin.")

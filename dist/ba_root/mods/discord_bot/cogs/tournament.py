@@ -6,7 +6,7 @@ import asyncio
 
 import discord
 from discord import Interaction, app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from discord_bot.client import GameClient
 from discord_bot.helpers import require
@@ -17,6 +17,7 @@ from discord_bot.ui import (
     SoloRegistrationModal,
     allowed_mentions_for,
     invitation_view,
+    participant_role,
 )
 from server.enums import (
     Authority,
@@ -41,7 +42,6 @@ async def refresh_register_panel(bot: commands.Bot) -> None:
     try:
         channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
     except discord.NotFound:
-        # the channel is gone, forget the panel so a fresh one can be posted.
         tournament.clear_panel()
         return
     except discord.HTTPException:
@@ -69,6 +69,33 @@ class TournamentCommands(
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         super().__init__()
+
+    async def cog_load(self) -> None:
+        self.hourly_refresh.start()
+
+    async def cog_unload(self) -> None:
+        self.hourly_refresh.cancel()
+
+    @tasks.loop(hours=1)
+    async def hourly_refresh(self) -> None:
+        """keeps the panel's numbers fresh — team counts change from user actions, not just admin ones."""
+        try:
+            await refresh_register_panel(self.bot)
+        except Exception:
+            pass
+
+    @hourly_refresh.before_loop
+    async def before_hourly_refresh(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _get_thread(self, thread_id: int):
+        """returns the thread if reachable, otherwise None."""
+        if not thread_id:
+            return None
+        try:
+            return self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
+        except discord.HTTPException:
+            return None
 
     @app_commands.command(name="create")
     @app_commands.describe(
@@ -123,7 +150,6 @@ class TournamentCommands(
         """posts the registration panel here (cleans up the previous one)."""
         await interaction.response.defer(ephemeral=True)
 
-        # drop the old panel if there was one.
         old_channel_id, old_message_id = tournament.get_panel()
         if old_channel_id and old_message_id:
             try:
@@ -135,9 +161,7 @@ class TournamentCommands(
 
         message = await interaction.channel.send(view=RegisterView())
         tournament.set_panel(interaction.channel.id, message.id)
-        await interaction.followup.send(
-            "Registration panel posted.", ephemeral=True
-        )
+        await interaction.followup.send("Registration panel posted.", ephemeral=True)
 
     @app_commands.command(name="cancel")
     @require(Authority.LEADER)
@@ -240,6 +264,16 @@ class TournamentCommands(
                 "This user is already on your team.", ephemeral=True
             )
             return
+
+        remaining = registration.cooldown_remaining(team.id, str(user.id))
+        if remaining > 0:
+            minutes = int(remaining // 60) + 1
+            await interaction.response.send_message(
+                f"This user declined a recent invite. You can try again in about {minutes} minute(s).",
+                ephemeral=True,
+            )
+            return
+
         if not link.is_linked(str(user.id)):
             await interaction.response.send_message(
                 "This user hasn't linked their game account yet.", ephemeral=True
@@ -278,25 +312,129 @@ class TournamentCommands(
         )
         view = invitation_view(updated, season_id, invite_text=invite_text)
 
-        if updated.thread_id:
+        thread = await self._get_thread(updated.thread_id)
+        if thread is not None:
             try:
-                thread = self.bot.get_channel(updated.thread_id)
-                if thread is None:
-                    thread = await self.bot.fetch_channel(updated.thread_id)
+                await thread.add_user(user)
             except discord.HTTPException:
-                thread = None
-            if thread is not None:
-                try:
-                    await thread.add_user(user)
-                except discord.HTTPException:
-                    pass
-                try:
-                    await thread.send(
-                        view=view,
-                        allowed_mentions=allowed_mentions_for(user),
-                    )
-                except discord.HTTPException:
-                    pass
+                pass
+            try:
+                await thread.send(
+                    view=view,
+                    allowed_mentions=allowed_mentions_for(user),
+                )
+            except discord.HTTPException:
+                pass
+
+    @app_commands.command(name="leave")
+    async def leave_team(self, interaction: Interaction) -> None:
+        """leaves your team. if you're the captain, the whole team is dissolved."""
+        season_id = tournament.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing.", ephemeral=True
+            )
+            return
+
+        registration = Registration(season_id=season_id)
+        team = registration.team_of(str(interaction.user.id))
+        if not team:
+            await interaction.response.send_message(
+                "You're not on a team.", ephemeral=True
+            )
+            return
+
+        season = tournament.get_season(season_id)
+        if season and season.stage != TournamentStage.REGISTRATION:
+            await interaction.response.send_message(
+                "The tournament has already started, you can't leave now.",
+                ephemeral=True,
+            )
+            return
+
+        is_captain = team.captain == str(interaction.user.id)
+        if is_captain:
+            prompt = (
+                f"You're the captain of **{team.id}**. Leaving will dissolve the whole "
+                f"team and remove every member. Are you sure?"
+            )
+        else:
+            prompt = f"Leave **{team.id}**?"
+
+        async def confirmed(confirm_interaction: Interaction) -> None:
+            current = Registration(season_id=season_id).get_team(team.id)
+            if not current:
+                await confirm_interaction.response.edit_message(
+                    content="That team is no longer there.", view=None
+                )
+                return
+
+            await confirm_interaction.response.edit_message(
+                content="Working...", view=None
+            )
+
+            role = participant_role(interaction.guild, season_id)
+            thread = await self._get_thread(current.thread_id)
+
+            if is_captain:
+                members = list(current.members)
+                Registration(season_id=season_id).delete(team.id)
+
+                for member in members:
+                    try:
+                        user = interaction.guild.get_member(int(member.discord_id))
+                    except (TypeError, ValueError):
+                        continue
+                    if user and role and role in user.roles:
+                        try:
+                            await user.remove_roles(role)
+                        except discord.HTTPException:
+                            pass
+
+                if thread is not None:
+                    try:
+                        await thread.send(
+                            f"**{team.id}** was dissolved by the captain."
+                        )
+                        await thread.edit(archived=True, locked=True)
+                    except discord.HTTPException:
+                        pass
+
+                await confirm_interaction.followup.send(
+                    f"Team **{team.id}** dissolved.", ephemeral=True
+                )
+            else:
+                updated = Registration(season_id=season_id).leave(
+                    str(interaction.user.id)
+                )
+
+                if role and role in interaction.user.roles:
+                    try:
+                        await interaction.user.remove_roles(role)
+                    except discord.HTTPException:
+                        pass
+
+                if thread is not None and updated is not None:
+                    try:
+                        await thread.send(
+                            f"<@{updated.captain}> {interaction.user.mention} left the team."
+                        )
+                    except discord.HTTPException:
+                        pass
+
+                await confirm_interaction.followup.send(
+                    f"You left **{team.id}**.", ephemeral=True
+                )
+
+            await refresh_register_panel(self.bot)
+
+        view = ConfirmView(
+            interaction.user.id,
+            confirmed,
+            confirm_label="Yes, leave",
+            abort_text="You're still on the team.",
+        )
+        await interaction.response.send_message(prompt, view=view, ephemeral=True)
 
     @app_commands.command(name="registrations")
     @app_commands.describe(option="Open or close the registrations")

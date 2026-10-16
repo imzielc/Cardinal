@@ -8,6 +8,7 @@ import discord
 from discord import AllowedMentions, ButtonStyle, Guild, Interaction, Role, ui
 from discord.utils import get
 
+from server.enums import TeamStatus
 from tournament import tournament
 from tournament.link import link
 from tournament.registration import Registration
@@ -127,8 +128,8 @@ class RegisterView(ui.LayoutView):
             container.add_item(ui.Separator())
             button = ui.Button(
                 label="Register",
-                style=ButtonStyle.success,
-                emoji="📝",
+                style=ButtonStyle.primary,
+                emoji="<:register:1560371261459267654>",
                 custom_id=REGISTER_BUTTON_ID,
                 disabled=True,
             )
@@ -136,11 +137,23 @@ class RegisterView(ui.LayoutView):
             type_str = season.type.value.replace("_", " ").title()
             series_str = season.series.value.replace("_", " ").title()
             mode_str = season.mode.value.replace("_", " ").title()
+
+            total, verified = 0, 0
+            try:
+                reg = Registration(season_id=season_id).read()
+                total = len(reg.teams)
+                verified = sum(
+                    1 for t in reg.teams.values() if t.status == TeamStatus.VERIFIED
+                )
+            except Exception:
+                pass
+
             container.add_item(
                 ui.TextDisplay(
                     f"**Season** `{season_id}`\n"
                     f"**Format** {type_str} • {series_str}\n"
-                    f"**Mode** {mode_str}"
+                    f"**Mode** {mode_str}\n"
+                    f"**Teams** {total} registered • {verified} verified"
                 )
             )
             container.add_item(ui.Separator())
@@ -154,8 +167,8 @@ class RegisterView(ui.LayoutView):
                 )
                 button = ui.Button(
                     label="Register",
-                    style=ButtonStyle.success,
-                    emoji="📝",
+                    style=ButtonStyle.primary,
+                    emoji="<:register:1560371261459267654>",
                     custom_id=REGISTER_BUTTON_ID,
                 )
                 button.callback = self.register_btn
@@ -165,8 +178,8 @@ class RegisterView(ui.LayoutView):
                 )
                 button = ui.Button(
                     label="Register",
-                    style=ButtonStyle.success,
-                    emoji="📝",
+                    style=ButtonStyle.primary,
+                    emoji="<:register:1560371261459267654>",
                     custom_id=REGISTER_BUTTON_ID,
                     disabled=True,
                 )
@@ -225,7 +238,7 @@ class LinkedAccountView(ui.LayoutView):
         account_id = str(self.data.get("id") or self.discord_id)
 
         container = ui.Container()
-        container.add_item(ui.TextDisplay("### 🔗  Linked account"))
+        container.add_item(ui.TextDisplay("### Linked account"))
         container.add_item(
             ui.TextDisplay(
                 f"**Tag**  `{tag}`\n"
@@ -238,15 +251,15 @@ class LinkedAccountView(ui.LayoutView):
 
         created = parse_date(self.data.get("create_time", ""))
         if created:
-            rows.append(f"📅  **Created**  <t:{created}:D>")
+            rows.append(f"**Created**  <t:{created}:D>")
 
         last = parse_date(self.data.get("last_active_day", ""))
         if last:
-            rows.append(f"🟢  **Last seen**  <t:{last}:D>")
+            rows.append(f"**Last seen**  <t:{last}:D>")
 
         days = self.data.get("total_active_days")
         if days is not None:
-            rows.append(f"📊  **Active days**  `{days}`")
+            rows.append(f"**Active days**  `{days}`")
 
         if rows:
             container.add_item(ui.TextDisplay("\n".join(rows)))

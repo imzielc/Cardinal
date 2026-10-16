@@ -11,23 +11,28 @@ from tournament import posts
 from tournament.webhook import Webhook
 from pathlib import Path
 
-try: 
-    from PIL import Image, ImageDraw, ImageFont
+try:
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 except ImportError:
     import shutil
     uv = shutil.which("uv")
     # quietly install it.
     subprocess.run([uv, "add", "pillow"], check=True)
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+
+# Pillow changed the resampling attribute name at 9.1, keep both working.
+RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS
+RESAMPLE_BICUBIC = getattr(Image, "Resampling", Image).BICUBIC
 
 ##### start setup #####
 
 FILES = {
-    "title.png": "https://files.catbox.moe/aw1utu.png",
-    "logo.png": "https://files.catbox.moe/g92tad.png",
+    "title.png": "https://files.catbox.moe/vx4tt3.png",
+    "logo.png": "https://files.catbox.moe/09phpf.png",
     "arial.ttf": "https://cdn.jsdelivr.net/gh/taveevut/Windows-10-Fonts-Default@master/arial.ttf",
     "arialbd.ttf": "https://cdn.jsdelivr.net/gh/taveevut/Windows-10-Fonts-Default@master/arialbd.ttf",
 }
+
 
 def download(url: str, path: str) -> bool:
     """downloads a file from a url to a path"""
@@ -62,28 +67,34 @@ HEIGHT = 1080
 BRACKET_WIDTH = 3840
 BRACKET_HEIGHT = 2160
 
-BG = (5, 4, 13)
-WHITE = (244, 245, 255)
-MUTED = (140, 148, 175)
-MUTED_BOARD = (160, 168, 195)
-PURPLE = (190, 72, 255)
-BLUE = (45, 180, 255)
-CYAN = (70, 215, 255)
-GREEN = (75, 230, 160)
-RED = (240, 70, 85)
-RED_BOARD = (255, 95, 125)
-GOLD = (255, 215, 0)
-SILVER = (192, 192, 192)
-BRONZE = (205, 127, 50)
-BYE = (255, 204, 82)
+# ---- glassy blue theme ----
+BG = (3, 9, 17)
+BG_TOP = (3, 9, 17)
+BG_BOTTOM = (6, 30, 46)
+
+WHITE = (234, 246, 251)
+MUTED = (134, 163, 184)
+MUTED_BOARD = (150, 178, 198)
+
+ACCENT = (34, 200, 240)
+CYAN = (90, 228, 255)
+BLUE = (80, 150, 255)
+TEAL = (40, 226, 200)
+GREEN = (46, 230, 166)
+RED = (255, 107, 134)
+RED_BOARD = (255, 122, 148)
+GOLD = (255, 208, 90)
+SILVER = (196, 214, 228)
+BRONZE = (214, 140, 86)
+BYE = (255, 190, 85)
 
 GROUP_COLORS = [
-    PURPLE,
+    ACCENT,
     BLUE,
-    (210, 80, 255),
-    (65, 145, 255),
-    (160, 75, 255),
-    (55, 200, 235),
+    TEAL,
+    (120, 175, 255),
+    (60, 215, 230),
+    (100, 135, 255),
 ]
 
 
@@ -183,22 +194,125 @@ def draw_star_icon(d, cx, cy, size, fill):
     d.polygon(points, fill=fill)
 
 
+# --------------------------------------------------------------------------
+# glass panels
+# --------------------------------------------------------------------------
+
+
+def _rgba(c, a=255):
+    return (c[0], c[1], c[2], c[3] if len(c) > 3 else a)
+
+
+def _glass_tint(fill):
+    """turns the old dark fills into translucent glass tints."""
+    r, g, b, a = _rgba(fill)
+    mx, mn = max(r, g, b), min(r, g, b)
+    if mx > 120:                       # bright accent strip -> plain highlight
+        return (r, g, b, min(a, 90))
+    if b == mx or mx - mn < 14:        # neutral dark -> teal glass
+        return (12, 66, 92, int(55 + a * 0.28))
+    k = 2.6                            # green / red / gold / bronze -> keep the hue
+    return (min(255, int(r * k)), min(255, int(g * k)), min(255, int(b * k)), int(60 + a * 0.25))
+
+
+def _glass_line(outline):
+    if outline is None:
+        return None
+    r, g, b, a = _rgba(outline)
+    if max(r, g, b) <= 130:            # old dark purple outlines -> soft steel blue
+        return (70, 150, 185, a)
+    return (r, g, b, a)
+
+
+def _glass(img, box, radius, fill, outline, width, corners):
+    """one glass panel: blurred backdrop, teal tint, top sheen, inner cyan glow, glowing corners."""
+    x1, y1, x2, y2 = [int(round(v)) for v in box]
+    w, h = x2 - x1, y2 - y1
+    if w < 3 or h < 3:
+        return
+    pad = 14 if corners else 0
+    rx1, ry1 = max(0, x1 - pad), max(0, y1 - pad)
+    rx2, ry2 = min(img.width, x2 + pad), min(img.height, y2 + pad)
+    if rx2 <= rx1 or ry2 <= ry1:
+        return
+    L, T, R, B = x1 - rx1, y1 - ry1, x2 - rx1 - 1, y2 - ry1 - 1
+    box_l = (L, T, R, B)
+    region = img.crop((rx1, ry1, rx2, ry2))
+    region.putalpha(255)
+    size = region.size
+    rr = max(1, min(int(radius), w // 2, h // 2))
+
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(box_l, radius=rr, fill=255)
+
+    flat = max(_rgba(fill)[:3]) > 120          # bright accent strips stay flat, no blur
+    glass = region.copy() if (flat or w * h <= 2500) else region.filter(ImageFilter.GaussianBlur(7))
+    glass.alpha_composite(Image.new("RGBA", size, _glass_tint(fill)))
+
+    if h >= 36 and not flat:   # soft light from the top
+        gh = max(1, min(h, 90))
+        grad = Image.linear_gradient("L").rotate(180).resize((size[0], gh))
+        a = Image.new("L", size, 0)
+        a.paste(grad.point(lambda v: int(v * 0.10)), (0, T))
+        sheen = Image.new("RGBA", size, (190, 235, 255, 255))
+        sheen.putalpha(a)
+        glass.alpha_composite(sheen)
+
+    if h >= 24 and not flat:   # inner cyan glow along the edge
+        ring = Image.new("L", size, 0)
+        ImageDraw.Draw(ring).rounded_rectangle(box_l, radius=rr, outline=255, width=max(4, min(14, h // 6)))
+        ring = ring.filter(ImageFilter.GaussianBlur(5))
+        inner = Image.new("RGBA", size, (34, 200, 240, 255))
+        inner.putalpha(ring.point(lambda v: int(v * 0.28)))
+        glass.alpha_composite(inner)
+
+    out = region.copy()
+    out.paste(glass, (0, 0), mask)
+
+    layer = Image.new("RGBA", size, (0, 0, 0, 0))
+    ol = _glass_line(outline)
+    if ol:
+        ImageDraw.Draw(layer).rounded_rectangle(box_l, radius=rr, outline=ol, width=max(1, int(width)))
+
+    if corners:
+        c = max(10, min(30, min(w, h) // 3))
+        ring2 = Image.new("L", size, 0)
+        ImageDraw.Draw(ring2).rounded_rectangle(box_l, radius=rr, outline=255, width=3)
+        cm = Image.new("L", size, 0)
+        cd = ImageDraw.Draw(cm)
+        for cx, cy in ((L, T), (R - c, T), (L, B - c), (R - c, B - c)):
+            cd.rectangle((cx, cy, cx + c, cy + c), fill=255)
+        corner = ImageChops.multiply(ring2, cm)
+
+        edge = ring2.filter(ImageFilter.GaussianBlur(6)).point(lambda v: int(v * 0.35))
+        eg = Image.new("RGBA", size, (34, 200, 240, 255))
+        eg.putalpha(edge)
+        out.alpha_composite(eg)                       # faint glow around the whole panel
+
+        glow = corner.filter(ImageFilter.GaussianBlur(5)).point(lambda v: min(255, int(v * 1.6)))
+        gl = Image.new("RGBA", size, (34, 200, 240, 255))
+        gl.putalpha(glow)
+        layer.alpha_composite(gl)                     # bright glow on the four corners
+        cr = Image.new("RGBA", size, (130, 238, 255, 255))
+        cr.putalpha(corner)
+        layer.alpha_composite(cr)                     # crisp corner stroke
+
+    out.alpha_composite(layer)
+    img.paste(out, (rx1, ry1))
+
+
 def draw_rounded_rect(
-    img, box, radius=16, fill=(10, 9, 22, 230), outline=(190, 72, 255, 180), width=2
+    img, box, radius=16, fill=(10, 9, 22, 230), outline=(34, 200, 240, 180), width=2
 ):
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(overlay)
-    d.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
-    img.alpha_composite(overlay)
+    _glass(img, box, radius, fill, outline, width, True)
 
 
 def draw_alpha_rounded_rectangle(
     img, box, radius=12, fill=(10, 9, 22, 140), outline=None, width=1
 ):
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(overlay)
-    d.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
-    img.alpha_composite(overlay)
+    w, h = box[2] - box[0], box[3] - box[1]
+    big = outline is not None and min(w, h) >= 50 and width >= 2
+    _glass(img, box, radius, fill, outline, width, big)
 
 
 def make_background(
@@ -211,19 +325,33 @@ def make_background(
     star_radius_choices=(1, 1, 1, 2),
     star_alpha_range=(25, 95),
 ):
-    img = Image.new("RGBA", (width, height), (*BG, 255))
-    d = ImageDraw.Draw(img)
+    """deep navy gradient + soft cyan light orbs (so the glass has something to blur) + dot grid."""
+    grad = Image.linear_gradient("L").resize((width, height))
+    img = Image.composite(
+        Image.new("RGB", (width, height), BG_BOTTOM),
+        Image.new("RGB", (width, height), BG_TOP),
+        grad,
+    ).convert("RGBA")
 
-    top, bottom = (4, 3, 11), (12, 7, 28)
-    for y in range(height):
-        t = y / (height - 1)
-        c = tuple(int(top[i] * (1 - t) + bottom[i] * t) for i in range(3))
-        d.line((0, y, width, y), fill=(*c, 255))
+    sw, sh = max(8, width // 8), max(8, height // 8)
+    orbs = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    od = ImageDraw.Draw(orbs)
+    od.ellipse((-sw * 0.2, -sh * 0.35, sw * 0.55, sh * 0.55), fill=(34, 200, 240, 95))
+    od.ellipse((sw * 0.55, sh * 0.55, sw * 1.2, sh * 1.3), fill=(20, 150, 190, 85))
+    od.ellipse((sw * 0.3, sh * 0.25, sw * 0.85, sh * 0.8), fill=(40, 110, 230, 40))
+    orbs = orbs.filter(ImageFilter.GaussianBlur(max(3, sw // 10))).resize((width, height), RESAMPLE_BICUBIC)
+    img.alpha_composite(orbs)
 
-    box1, color1, w1 = ellipse1
-    d.ellipse(box1, outline=color1, width=w1)
-    box2, color2, w2 = ellipse2
-    d.ellipse(box2, outline=color2, width=w2)
+    ov = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    d = ImageDraw.Draw(ov)
+    for box, color, w in (ellipse1, ellipse2):
+        c = (color[0], color[1], color[2], min(255, color[3] * 2))
+        d.ellipse(box, outline=c, width=w)
+
+    step = 40
+    for x in range(step // 2, width, step):
+        for y in range(step // 2, height, step):
+            d.ellipse((x - 1, y - 1, x + 1, y + 1), fill=(34, 200, 240, 20))
 
     if star_count:
         random.seed(star_seed)
@@ -232,8 +360,9 @@ def make_background(
             y = random.randrange(height)
             r = random.choice(star_radius_choices)
             a = random.randrange(*star_alpha_range)
-            d.ellipse((x - r, y - r, x + r, y + r), fill=(150, 130, 220, a))
+            d.ellipse((x - r, y - r, x + r, y + r), fill=(150, 225, 255, a))
 
+    img.alpha_composite(ov)
     return img
 
 
@@ -243,7 +372,7 @@ def add_watermark(
     if not os.path.exists(logo_file):
         return
     logo = Image.open(logo_file).convert("RGBA")
-    logo.thumbnail(thumb_size, Image.Resampling.LANCZOS)
+    logo.thumbnail(thumb_size, RESAMPLE)
     alpha_channel = logo.getchannel("A").point(lambda a: int(a * alpha))
     logo.putalpha(alpha_channel)
     x = (canvas_w - logo.width) // 2
@@ -255,7 +384,7 @@ def generate_match_result(data: dict, webhook: Webhook) -> None:
     img = make_background(
         WIDTH,
         HEIGHT,
-        ellipse1=((-200, -300, WIDTH + 200, HEIGHT + 400), (*PURPLE, 25), 4),
+        ellipse1=((-200, -300, WIDTH + 200, HEIGHT + 400), (*ACCENT, 25), 4),
         ellipse2=((-100, -200, WIDTH + 100, HEIGHT + 300), (*BLUE, 20), 3),
     )
     add_watermark(img, LOGO_FILE, WIDTH, HEIGHT, alpha=0.15)
@@ -266,7 +395,7 @@ def generate_match_result(data: dict, webhook: Webhook) -> None:
     if os.path.exists(TITLE_FILE):
         try:
             title_img = Image.open(TITLE_FILE).convert("RGBA")
-            title_img.thumbnail((650, 200), Image.Resampling.LANCZOS)
+            title_img.thumbnail((650, 200), RESAMPLE)
             img.alpha_composite(title_img, ((WIDTH - title_img.width) // 2, top_y))
             top_y += title_img.height + 25
         except Exception:
@@ -287,14 +416,14 @@ def generate_match_result(data: dict, webhook: Webhook) -> None:
     glow_box = (badge_box[0] - 6, badge_box[1] - 6, badge_box[2] + 6, badge_box[3] + 6)
 
     draw_rounded_rect(
-        img, glow_box, radius=14, fill=(255, 215, 0, 25), outline=(*GOLD, 100), width=1
+        img, glow_box, radius=14, fill=(34, 200, 240, 25), outline=(*ACCENT, 100), width=1
     )
     draw_rounded_rect(
-        img, badge_box, radius=10, fill=(20, 16, 38, 245), outline=(*GOLD, 230), width=2
+        img, badge_box, radius=10, fill=(20, 16, 38, 245), outline=(*ACCENT, 230), width=2
     )
-    center_text(d, center_x, top_y + badge_h // 2, header_text, banner_font, GOLD)
-    draw_star_icon(d, center_x - tw / 2 - 25, top_y + badge_h // 2, 8, GOLD)
-    draw_star_icon(d, center_x + tw / 2 + 25, top_y + badge_h // 2, 8, GOLD)
+    center_text(d, center_x, top_y + badge_h // 2, header_text, banner_font, CYAN)
+    draw_star_icon(d, center_x - tw / 2 - 25, top_y + badge_h // 2, 8, CYAN)
+    draw_star_icon(d, center_x + tw / 2 + 25, top_y + badge_h // 2, 8, CYAN)
 
     top_y += badge_h + 35
 
@@ -305,7 +434,7 @@ def generate_match_result(data: dict, webhook: Webhook) -> None:
         card_box,
         radius=20,
         fill=(12, 10, 26, 235),
-        outline=(*PURPLE, 200),
+        outline=(*ACCENT, 200),
         width=3,
     )
 
@@ -370,7 +499,7 @@ def generate_match_result(data: dict, webhook: Webhook) -> None:
         img.convert("RGB").save(image_buffer, "PNG", optimize=True)
         image_buffer.seek(0)
         files = webhook.create("match_result.png", image_buffer)
-        webhook.send("results", f"match_result-{data["key"]}", files)
+        webhook.send("results", f"match_result-{data['key']}", files)
 
 
 def generate_player_standings(
@@ -385,7 +514,7 @@ def generate_player_standings(
     img = make_background(
         WIDTH,
         HEIGHT,
-        ellipse1=((-200, -300, WIDTH + 200, HEIGHT + 400), (*PURPLE, 25), 4),
+        ellipse1=((-200, -300, WIDTH + 200, HEIGHT + 400), (*ACCENT, 25), 4),
         ellipse2=((-100, -200, WIDTH + 100, HEIGHT + 300), (*BLUE, 20), 3),
     )
     add_watermark(img, LOGO_FILE, WIDTH, HEIGHT, alpha=0.12)
@@ -396,7 +525,7 @@ def generate_player_standings(
     if os.path.exists(TITLE_FILE):
         try:
             title_img = Image.open(TITLE_FILE).convert("RGBA")
-            title_img.thumbnail((580, 180), Image.Resampling.LANCZOS)
+            title_img.thumbnail((580, 180), RESAMPLE)
             img.alpha_composite(title_img, ((WIDTH - title_img.width) // 2, top_y))
             top_y += title_img.height + 15
         except Exception:
@@ -416,14 +545,14 @@ def generate_player_standings(
     glow_box = (badge_box[0] - 5, badge_box[1] - 5, badge_box[2] + 5, badge_box[3] + 5)
 
     draw_rounded_rect(
-        img, glow_box, radius=12, fill=(255, 215, 0, 20), outline=(*GOLD, 80), width=1
+        img, glow_box, radius=12, fill=(34, 200, 240, 20), outline=(*ACCENT, 80), width=1
     )
     draw_rounded_rect(
-        img, badge_box, radius=10, fill=(20, 16, 38, 245), outline=(*GOLD, 230), width=2
+        img, badge_box, radius=10, fill=(20, 16, 38, 245), outline=(*ACCENT, 230), width=2
     )
-    center_text(d, center_x, top_y + badge_h // 2, header_text, banner_font, GOLD)
-    draw_star_icon(d, center_x - tw / 2 - 25, top_y + badge_h // 2, 8, GOLD)
-    draw_star_icon(d, center_x + tw / 2 + 25, top_y + badge_h // 2, 8, GOLD)
+    center_text(d, center_x, top_y + badge_h // 2, header_text, banner_font, CYAN)
+    draw_star_icon(d, center_x - tw / 2 - 25, top_y + badge_h // 2, 8, CYAN)
+    draw_star_icon(d, center_x + tw / 2 + 25, top_y + badge_h // 2, 8, CYAN)
 
     top_y += badge_h + 25
 
@@ -434,7 +563,7 @@ def generate_player_standings(
         board_box,
         radius=18,
         fill=(12, 10, 26, 235),
-        outline=(*PURPLE, 180),
+        outline=(*ACCENT, 180),
         width=3,
     )
 
@@ -500,7 +629,7 @@ def generate_player_standings(
             rank_str, row_bg, row_outline, text_color = (
                 f"#{rank}",
                 (16, 14, 34, 180),
-                (*PURPLE, 60),
+                (*ACCENT, 60),
                 WHITE,
             )
 
@@ -519,7 +648,7 @@ def generate_player_standings(
         d.text((col_name, ty), name, font=row_font, fill=text_color)
         d.text((col_score, ty), f"{score:,}", font=row_font, fill=WHITE)
         d.text((col_kills, ty), str(kills), font=row_font, fill=GREEN)
-        d.text((col_deaths, ty), str(deaths), font=row_font, fill=(240, 70, 85))
+        d.text((col_deaths, ty), str(deaths), font=row_font, fill=RED)
         d.text((col_kd, ty), f"{kd_val:.2f}", font=row_font, fill=CYAN)
         d.text((col_games, ty), str(games), font=row_font, fill=MUTED)
 
@@ -547,7 +676,7 @@ def _draw_group_header(img, subtitle):
 
     if os.path.exists(TITLE_FILE):
         title_img = Image.open(TITLE_FILE).convert("RGBA")
-        title_img.thumbnail((910, 170), Image.Resampling.LANCZOS)
+        title_img.thumbnail((910, 170), RESAMPLE)
         center_x = (WIDTH - title_img.width) // 2
         img.alpha_composite(title_img, (center_x, top_y))
 
@@ -580,7 +709,7 @@ def _group_background():
     return make_background(
         WIDTH,
         HEIGHT,
-        ellipse1=((-250, -420, WIDTH + 250, HEIGHT + 600), (*PURPLE, 35), 4),
+        ellipse1=((-250, -420, WIDTH + 250, HEIGHT + 600), (*ACCENT, 35), 4),
         ellipse2=((-160, -330, WIDTH + 160, HEIGHT + 510), (*BLUE, 28), 3),
         star_count=220,
         star_seed=19,
@@ -613,7 +742,7 @@ def _generate_single_group_standings(
         (card_x, card_y, card_x + card_w, card_y + card_h),
         radius=16,
         fill=(9, 8, 20, 160),
-        outline=(*PURPLE, 180),
+        outline=(*ACCENT, 180),
         width=2,
     )
 
@@ -844,7 +973,7 @@ def draw_round_column(img, x, y, w, h, round_number, round_data, accent):
         get_font(21, True),
         WHITE,
     )
-    status_color = BLUE if status == "IN_PROGRESS" else PURPLE
+    status_color = BLUE if status == "IN_PROGRESS" else ACCENT
     center_text_box(
         d,
         (x + 15, y + 36, x + w - 15, y + 57),
@@ -1054,7 +1183,7 @@ def _bracket_background():
         BRACKET_HEIGHT,
         ellipse1=(
             (-400, -700, BRACKET_WIDTH + 400, BRACKET_HEIGHT + 900),
-            (*PURPLE, 30),
+            (*ACCENT, 30),
             6,
         ),
         ellipse2=(
@@ -1073,7 +1202,7 @@ def draw_bracket_header(img):
     if not os.path.exists(TITLE_FILE):
         return
     title_img = Image.open(TITLE_FILE).convert("RGBA")
-    title_img.thumbnail((1200, 200), Image.Resampling.LANCZOS)
+    title_img.thumbnail((1200, 200), RESAMPLE)
     center_x = (BRACKET_WIDTH - title_img.width) // 2
     img.alpha_composite(title_img, (center_x, 20))
 
@@ -1083,7 +1212,7 @@ def draw_bracket_match_card(img, d, box, team1, team2, winner, font, card_w, car
     mid_y = y1 + (card_h / 2)
 
     draw_alpha_rounded_rectangle(
-        img, box, radius=10, fill=(10, 9, 22, 235), outline=(*PURPLE, 160), width=2
+        img, box, radius=10, fill=(10, 9, 22, 235), outline=(*ACCENT, 160), width=2
     )
 
     t1_box = (x1 + 4, y1 + 4, x2 - 4, mid_y - 2)
@@ -1641,8 +1770,8 @@ DE_COL_GAP, DE_ROW_GAP = 70, 34
 DE_MARGIN = 90
 DE_HEADER_H = 250
 DE_SECTION_H = 150
-DE_WINNERS_COLOR = BLUE
-DE_LOSERS_COLOR = (255, 150, 60)
+DE_WINNERS_COLOR = CYAN
+DE_LOSERS_COLOR = (255, 176, 96)
 
 
 def de_label(bracket: str, round_id, match_id) -> str:
@@ -1745,7 +1874,7 @@ def generate_double_elimination(season_dir: Path, webhook: Webhook) -> None:
     img = make_background(
         width,
         height,
-        ellipse1=((-400, -700, width + 400, height + 900), (*PURPLE, 30), 6),
+        ellipse1=((-400, -700, width + 400, height + 900), (*ACCENT, 30), 6),
         ellipse2=((-300, -600, width + 300, height + 800), (*BLUE, 25), 4),
         star_count=max(200, width * height // 20000),
         star_seed=42,
@@ -1755,7 +1884,7 @@ def generate_double_elimination(season_dir: Path, webhook: Webhook) -> None:
     add_watermark(img, LOGO_FILE, width, height, alpha=0.12, thumb_size=(1000, 1000))
     if os.path.exists(TITLE_FILE):
         title_img = Image.open(TITLE_FILE).convert("RGBA")
-        title_img.thumbnail((1200, 200), Image.Resampling.LANCZOS)
+        title_img.thumbnail((1200, 200), RESAMPLE)
         img.alpha_composite(title_img, ((width - title_img.width) // 2, 20))
     d = ImageDraw.Draw(img)
 
@@ -1889,10 +2018,10 @@ def generate_player_registration(name: str, webhook: Webhook):
     img = make_background(
         card_w, card_h,
         ellipse1=((-80, -100, card_w + 80, card_h + 120), (*CYAN, 35), 2),
-        ellipse2=((-40, -60, card_w + 40, card_h + 80), (*GOLD, 30), 2),
+        ellipse2=((-40, -60, card_w + 40, card_h + 80), (*BLUE, 30), 2),
         star_count=50, star_seed=77,
     )
-    
+
     add_watermark(img, LOGO_FILE, card_w, card_h, alpha=0.15, thumb_size=(320, 320))
     d = ImageDraw.Draw(img)
     center_x = card_w // 2
@@ -1902,7 +2031,7 @@ def generate_player_registration(name: str, webhook: Webhook):
     if os.path.exists(TITLE_FILE):
         try:
             title_img = Image.open(TITLE_FILE).convert("RGBA")
-            title_img.thumbnail((480, 110), Image.Resampling.LANCZOS)
+            title_img.thumbnail((480, 110), RESAMPLE)
             img.alpha_composite(title_img, ((card_w - title_img.width) // 2, top_y))
             top_y += title_img.height + 10
         except Exception as e:
@@ -1910,7 +2039,7 @@ def generate_player_registration(name: str, webhook: Webhook):
             top_y += 10
     else:
         main_title_font = get_font(34, bold=True)
-        center_text(d, center_x, top_y + 20, "SUCCESSFULLY REGISTERED", main_title_font, GOLD)
+        center_text(d, center_x, top_y + 20, "SUCCESSFULLY REGISTERED", main_title_font, CYAN)
         top_y += 50
 
     # Main Card Container Frame

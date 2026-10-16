@@ -44,6 +44,14 @@ class Link(Storage):
         """the game account id bound to this discord id, if any."""
         return self.read().links.get(str(discord_id))
 
+    def discord_of(self, account_id: str) -> str | None:
+        """reverse lookup: the discord id bound to this game account, if any."""
+        account_id = str(account_id)
+        for did, aid in self.read().links.items():
+            if aid == account_id:
+                return did
+        return None
+
     # ---- codes ----
 
     def issue_code(self, discord_id: str) -> str:

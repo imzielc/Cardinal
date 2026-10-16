@@ -9,6 +9,7 @@ from tournament.graphics import runner
 from tournament.schema import RegistrationSchema, MemberSchema, TeamSchema
 
 DEFAULT_INVITE_EXPIRE_HOURS = 24.0
+DECLINE_COOLDOWN_SECONDS = 30 * 60
 
 
 def _default_expire_seconds() -> float:
@@ -89,6 +90,19 @@ class Registration(Storage):
         self.commit(db)
         return team
 
+    # ---- cooldown ----
+
+    def cooldown_remaining(self, team_id: str, discord_id: str) -> float:
+        """seconds left before this member can be re-invited, 0 when no cooldown."""
+        team = self.get_team(team_id)
+        if not team:
+            return 0.0
+        ts = team.declined.get(str(discord_id), 0.0)
+        if not ts:
+            return 0.0
+        remaining = DECLINE_COOLDOWN_SECONDS - (time.time() - ts)
+        return max(0.0, remaining)
+
     # ---- registration ----
 
     def register(
@@ -111,7 +125,6 @@ class Registration(Storage):
         size = len(invited_members) + 1
         everyone = [captain_discord_id] + invited_members
 
-        # everyone must be linked, and none of them (discord or account) already on a team.
         accounts = {}
         for did in everyone:
             if self.is_registered(did):
@@ -146,7 +159,6 @@ class Registration(Storage):
             db.players[member.discord_id] = team_id
             db.players[member.account_id] = team_id
 
-        # solo has nothing to accept, no point in a timer either.
         expires_at = now + expire_seconds if size > 1 and expire_seconds > 0 else 0.0
 
         db.teams[team_id] = TeamSchema(
@@ -182,14 +194,13 @@ class Registration(Storage):
         ))
         db.players[discord_id] = team_id
         db.players[aid] = team_id
-        # adding a member brings the team back to the invitation stage.
         if team.status != TeamStatus.IN_INVITATION:
             team.status = TeamStatus.IN_INVITATION
         self.commit(db)
         return True
 
     def delete(self, team_id: str) -> str:
-        """removes the team entirely (used when the captain quits)."""
+        """removes the team entirely. returns the captain's discord id, or "" when missing."""
         db = self.read()
         team = db.teams.get(team_id)
         if not team:
@@ -204,7 +215,14 @@ class Registration(Storage):
         return captain
 
     def decline(self, discord_id: str) -> TeamSchema | None:
-        """removes the member from their team, returns the team if it still exists."""
+        """removes the member from their team, and records a re-invite cooldown."""
+        return self._remove_member(discord_id, cooldown=True)
+
+    def leave(self, discord_id: str) -> TeamSchema | None:
+        """removes the member from their team (their own choice), no cooldown."""
+        return self._remove_member(discord_id, cooldown=False)
+
+    def _remove_member(self, discord_id: str, cooldown: bool) -> TeamSchema | None:
         discord_id = str(discord_id)
         db = self.read()
         team_id = db.players.get(discord_id)
@@ -213,6 +231,7 @@ class Registration(Storage):
         team = db.teams.get(team_id)
         if not team:
             return None
+        # a captain never gets removed this way (they either dissolve or stay).
         if team.captain == discord_id:
             return None
 
@@ -226,6 +245,8 @@ class Registration(Storage):
 
         team.members = [m for m in team.members if m.discord_id != discord_id]
         team.status = TeamStatus.IN_INVITATION
+        if cooldown:
+            team.declined[discord_id] = time.time()
         self.commit(db)
         return team
 
@@ -282,7 +303,6 @@ class Registration(Storage):
                 if member.device_uuid:
                     return "already"
                 member.device_uuid = device_uuid
-                # whole team in? then the team is verified.
                 if all(m.device_uuid for m in team.members):
                     team.status = TeamStatus.VERIFIED
                     runner.run(data={
