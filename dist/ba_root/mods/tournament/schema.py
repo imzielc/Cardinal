@@ -1,9 +1,8 @@
 """all the dataclass schema for tournament."""
 from __future__ import annotations
 
-from dataclasses import asdict, field
-from pydantic.dataclasses import dataclass
-from pydantic import TypeAdapter
+from dataclasses import asdict, dataclass, field
+
 from server.enums import (
     SeriesType,
     Status,
@@ -13,18 +12,23 @@ from server.enums import (
     TournamentType,
 )
 
+
 class BaseSchema:
     """base schema for all the schemas."""
+
     @classmethod
     def from_dict(cls, data: dict):
         """validates the data into the schema."""
         if not data:
             return cls()
+        # pydantic is imported here, not at module load
+        from pydantic import TypeAdapter
         return TypeAdapter(cls).validate_python(data)
 
     def to_dict(self) -> dict:
         """serializes the schmea back into a dict."""
         return asdict(self)
+
 
 @dataclass
 class SeasonSchema(BaseSchema):
@@ -37,6 +41,7 @@ class SeasonSchema(BaseSchema):
     created_at: str = ""
     participant_role_id: int = 0
 
+
 @dataclass
 class TournamentSchema(BaseSchema):
     """Schema for all the seasons."""
@@ -47,6 +52,7 @@ class TournamentSchema(BaseSchema):
     # the one registration panel the bot tracks (0 means none).
     panel_channel_id: int = 0
     panel_message_id: int = 0
+
 
 @dataclass
 class MatchTeamSchema(BaseSchema):
@@ -59,6 +65,7 @@ class MatchTeamSchema(BaseSchema):
     # for its winner and "L:..." for its loser. a bye slot never gets a team.
     source: str | None = None
     bye: bool = False
+
 
 @dataclass
 class MatchSchema(BaseSchema):
@@ -75,6 +82,7 @@ class MatchSchema(BaseSchema):
     bracket: str | None = None
     is_bye: bool = False
 
+
 @dataclass
 class PendingMatchSchema(BaseSchema):
     """schema for a pending match."""
@@ -82,6 +90,7 @@ class PendingMatchSchema(BaseSchema):
     match: MatchSchema
     uuids: list[str]
     players: list[str]
+
 
 @dataclass
 class RoundSchema(BaseSchema):
@@ -91,6 +100,7 @@ class RoundSchema(BaseSchema):
     # the position of the round in its bracket (1 is the first), the round ids are not always numbers.
     number: int = 0
 
+
 @dataclass
 class GroupSchema(BaseSchema):
     """schema for a group."""
@@ -99,12 +109,14 @@ class GroupSchema(BaseSchema):
     standings_sorted: list[dict] = field(default_factory=list)
     role_id: int = 0
 
+
 @dataclass
 class GroupStageSchema(BaseSchema):
     """schema for the group stage."""
     groups: dict[str, GroupSchema] = field(default_factory=dict)
     winning_teams_per_group: int = 0
     status: Status = Status.PENDING
+
 
 @dataclass
 class BracketsMetaSchema(BaseSchema):
@@ -117,6 +129,7 @@ class BracketsMetaSchema(BaseSchema):
     status: Status = Status.PENDING
     # {"rank": 1, "team": "name"}, filled in when the tournament is over.
     placements: list[dict] = field(default_factory=list)
+
 
 @dataclass
 class MemberSchema(BaseSchema):
@@ -136,6 +149,7 @@ class MemberSchema(BaseSchema):
             data["device_uuid"] = "***"
         return data
 
+
 @dataclass
 class TeamSchema(BaseSchema):
     """schema for a team."""
@@ -152,12 +166,14 @@ class TeamSchema(BaseSchema):
     # the discord role that mentions this team (0 when not set, e.g. solo teams).
     role_id: int = 0
 
+
 @dataclass
 class RegistrationSchema(BaseSchema):
     """schema for the registration."""
     teams: dict[str, TeamSchema] = field(default_factory=dict)
     # keys can be a discord id or an account id, values are team ids.
     players: dict[str, str] = field(default_factory=dict)
+
 
 # ---- account linking ----
 
@@ -166,6 +182,7 @@ class LinkCodeSchema(BaseSchema):
     """a short-lived code waiting to be redeemed in-game."""
     discord_id: str
     expires_at: float = 0.0
+
 
 @dataclass
 class LinkedSchema(BaseSchema):
@@ -176,6 +193,7 @@ class LinkedSchema(BaseSchema):
     """
     codes: dict[str, LinkCodeSchema] = field(default_factory=dict)
     links: dict[str, str] = field(default_factory=dict)
+
 
 # ---- match threads (bot side) ----
 
