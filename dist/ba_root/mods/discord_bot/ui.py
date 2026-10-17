@@ -665,7 +665,6 @@ class TeamInvitationView(ui.LayoutView):
             )
             container.add_item(ui.Separator())
 
-        # per-member status
         member_lines = []
         for member in team.members:
             is_captain = member.discord_id == team.captain
@@ -697,14 +696,11 @@ class TeamInvitationView(ui.LayoutView):
             meta += f" · **Expires** <t:{int(team.expires_at)}:R>"
         container.add_item(ui.TextDisplay(meta))
 
-        # ---- buttons ----
         if all_verified:
-            # fully locked down: no buttons at all, view is final.
             self.add_item(container)
             return
 
         if all_accepted:
-            # everyone joined; declining via this view is no longer possible.
             accept = ui.Button(
                 label="Accept",
                 style=ButtonStyle.success,
@@ -734,7 +730,12 @@ class TeamInvitationView(ui.LayoutView):
         container.add_item(ui.ActionRow(accept, decline))
         self.add_item(container)
 
-    async def _refresh(self, interaction: Interaction) -> None:
+    async def _edit_interaction_message(self, interaction: Interaction) -> None:
+        """rebuilds the view from state and edits the message that triggered the interaction.
+
+        named to avoid colliding with discord.py's own View._refresh, which is
+        called internally by the library with a different signature.
+        """
         self._build()
         if interaction.message is None:
             return
@@ -807,7 +808,7 @@ class TeamInvitationView(ui.LayoutView):
             "You've joined the team! Run `/verify` in the game to finish.",
             ephemeral=True,
         )
-        await self._refresh(interaction)
+        await self._edit_interaction_message(interaction)
 
     async def decline_btn(self, interaction: Interaction) -> None:
         season_id = tournament.active_season
@@ -866,7 +867,7 @@ class TeamInvitationView(ui.LayoutView):
         if updated is None:
             return
 
-        await self._refresh(interaction)
+        await self._edit_interaction_message(interaction)
         await refresh_register_panel(interaction.client)
 
         if isinstance(interaction.channel, discord.Thread):
