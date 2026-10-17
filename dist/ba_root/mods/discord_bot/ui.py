@@ -16,8 +16,14 @@ from tournament.registration import Registration
 TEAM_NAME_MAX_LENGTH = 40
 THREAD_ARCHIVE_MINUTES = 1440
 THREAD_NAME_SUFFIX_MAX = 6
+TEAM_ROLE_PREFIX = "[Team] "
 
 REGISTER_BUTTON_ID = "tournament;register"
+
+
+def team_role_name(team_name: str) -> str:
+    """the discord role name for a team. discord caps role names at 100 chars."""
+    return f"{TEAM_ROLE_PREFIX}{team_name}"[:100]
 
 
 def thread_name(team_name: str, season_id: str) -> str:
@@ -135,7 +141,7 @@ async def create_team_role(guild: Guild, team_name: str, member_ids: list[int]) 
         return 0
     try:
         role = await guild.create_role(
-            name=team_name[:100],
+            name=team_role_name(team_name),
             mentionable=True,
             reason=f"Tournament team role for {team_name}",
         )

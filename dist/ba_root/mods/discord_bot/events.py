@@ -14,9 +14,8 @@ import threading
 import discord
 from discord.ext import commands
 
-from discord_bot.ui import TeamInvitationView, refresh_register_panel
+from discord_bot.ui import TeamInvitationView, refresh_register_panel, team_role_name
 from server import config
-from server.enums import TeamStatus
 from tournament import tournament
 from tournament.match_threads import match_threads
 from tournament.registration import Registration
@@ -169,31 +168,11 @@ async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
 # ---- one-shot migration ----
 
 
-def _message_has_invitation_buttons(message) -> bool:
-    """checks whether a message carries a tiv; accept/decline button anywhere in its tree."""
-    def walk(item) -> bool:
-        cid = getattr(item, "custom_id", None)
-        if isinstance(cid, str) and cid.startswith("tiv;"):
-            return True
-        children = getattr(item, "children", None) or []
-        return any(walk(child) for child in children)
+async def migrate_team_roles(bot: commands.Bot) -> None:
+    """renames every existing team role to the current "[Team] <name>" format.
 
-    try:
-        for item in (message.components or []):
-            if walk(item):
-                return True
-    except Exception:
-        pass
-    return False
-
-
-async def migrate_invitation_views(bot: commands.Bot) -> None:
-    """one-shot: fixes teams whose invitation message id was never recorded, and
-    re-renders any that are past the invitation stage so their message matches
-    the current design.
-
-    idempotent — running this on every startup is safe and cheap. teams with
-    a recorded id are skipped.
+    idempotent — roles that already carry the prefix are skipped. safe to run on
+    every startup.
     """
     season_id = tournament.active_season
     if not int(season_id or "0"):
@@ -206,53 +185,20 @@ async def migrate_invitation_views(bot: commands.Bot) -> None:
         return
 
     for team in db.teams.values():
-        if not team.thread_id:
+        if not team.role_id:
             continue
-        if team.invitation_message_id != 0:
+
+        role = _find_role(bot, team.role_id)
+        if role is None:
+            continue
+
+        expected = team_role_name(team.id)
+        if role.name == expected:
             continue
 
         try:
-            thread = bot.get_channel(team.thread_id) or await bot.fetch_channel(team.thread_id)
-        except Exception:
-            continue
-        if thread is None:
-            continue
-
-        # find the most recent invitation message in the thread.
-        found = None
-        try:
-            async for message in thread.history(limit=100):
-                if message.author.id != bot.user.id:
-                    continue
-                if _message_has_invitation_buttons(message):
-                    found = message
-                    break
-        except Exception:
-            pass
-
-        if found is None:
-            continue
-
-        # record the id so future events can edit this message.
-        registration.set_invitation_message(team.id, found.id)
-
-        # only re-render teams that are past the invitation stage.
-        if team.status not in (TeamStatus.UNVERIFIED, TeamStatus.VERIFIED):
-            continue
-
-        was_archived = getattr(thread, "archived", False)
-        if was_archived:
-            try:
-                await thread.edit(archived=False)
-            except Exception:
-                pass
-
-        try:
-            await found.edit(
-                view=TeamInvitationView(team_id=team.id, season_id=season_id),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except Exception:
+            await role.edit(name=expected)
+        except discord.HTTPException:
             pass
 
 
@@ -271,8 +217,6 @@ async def on_team_verified(bot: commands.Bot, payload: dict) -> None:
     if not int(season_id or "0") or not team_id:
         return
 
-    # the panel's team counts change only on the final verify, but refreshing
-    # on every verify is cheap and keeps everything in sync.
     await refresh_register_panel(bot)
 
     try:
@@ -302,8 +246,8 @@ async def on_team_verified(bot: commands.Bot, payload: dict) -> None:
         except Exception:
             pass
     else:
-        # fallback for teams that predate the tracked message id and have not
-        # been caught by the migration yet. records the id so this is one-shot.
+        # fallback for teams that predate the tracked message id. records the
+        # id so this is one-shot.
         try:
             message = await thread.send(
                 view=view,

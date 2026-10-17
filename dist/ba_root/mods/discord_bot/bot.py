@@ -44,8 +44,7 @@ class DiscordBot(commands.Bot):
         await self.add_cog(TournamentCommands(self))
         await self.add_cog(HeldPosts(self))
         await self.add_cog(TeamInvitationWatcher(self))
-        # one-shot migration: backfills invitation_message_id for pre-update teams
-        # and re-renders any past-invitation views to the current design.
+        # rename pre-existing team roles to the "[Team] <name>" format.
         asyncio.create_task(self._run_startup_migrations())
 
     def _restore_invitations(self) -> None:
@@ -65,10 +64,10 @@ class DiscordBot(commands.Bot):
         except Exception:
             return
         try:
-            from discord_bot.events import migrate_invitation_views
-            await migrate_invitation_views(self)
+            from discord_bot.events import migrate_team_roles
+            await migrate_team_roles(self)
         except Exception as e:
-            print(f"Discord: invitation migration failed: {e}")
+            print(f"Discord: role migration failed: {e}")
 
     async def on_app_cmd_error(
         self, interaction: Interaction, error: app_commands.AppCommandError
