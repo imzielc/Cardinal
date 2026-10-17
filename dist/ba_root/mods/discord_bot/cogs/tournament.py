@@ -287,10 +287,12 @@ class TournamentCommands(
             except discord.HTTPException:
                 pass
             try:
-                await thread.send(
+                message = await thread.send(
                     view=view,
                     allowed_mentions=allowed_mentions_for(user),
                 )
+                # the latest invitation is the one on_team_verified will edit.
+                registration.set_invitation_message(team.id, message.id)
             except discord.HTTPException:
                 pass
 

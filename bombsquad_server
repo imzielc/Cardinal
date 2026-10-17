@@ -1036,6 +1036,10 @@ class ServerManagerApp:
 
         # Attempt unclean exit if our unclean-exit-time passes (and
         # enforce a 7 hour max if not provided).
+
+        immediate = True 
+        if os.getenv("TOURNAMENT_MATCH") is not None:
+            immediate = False
         unclean_exit_minutes = 420.0
         if self._config.unclean_exit_minutes is not None:
             unclean_exit_minutes = min(
@@ -1055,10 +1059,10 @@ class ServerManagerApp:
                     flush=True,
                 )
                 if self._auto_restart:
-                    self.restart(immediate=False)
+                    self.restart(immediate=immediate)
                 else:
-                    self.shutdown(immediate=False)
-                self._subprocess_sent_unclean_exit = True
+                    self.shutdown(immediate=immediate)
+                self._subprocess_sent_unclean_exit = immediate
 
     def _reset_subprocess_vars(self) -> None:
         self._subprocess = None

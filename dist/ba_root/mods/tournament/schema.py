@@ -159,6 +159,8 @@ class TeamSchema(BaseSchema):
     members: list[MemberSchema] = field(default_factory=list)
     # the private thread the invitation lives in (0 when there is none).
     thread_id: int = 0
+    # the tracked invitation message inside that thread (0 when not set).
+    invitation_message_id: int = 0
     # the unix time the invitation expires (0 means no expiration).
     expires_at: float = 0.0
     # discord_id -> unix time they declined. used to cool down re-invites.

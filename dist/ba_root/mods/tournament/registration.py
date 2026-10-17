@@ -22,6 +22,16 @@ def _default_expire_seconds() -> float:
     return max(0.0, hours) * 3600
 
 
+def _season_team_size(season_id: str) -> int:
+    """the number of players a team needs in this season, or 0 when unknown."""
+    try:
+        from tournament.storage import tournament as tournament_storage
+        season = tournament_storage.get_season(season_id)
+        return season.type.count if season else 0
+    except Exception:
+        return 0
+
+
 class Registration(Storage):
     """storage class for registration"""
 
@@ -122,12 +132,17 @@ class Registration(Storage):
         """registers a team/solo, pulling account ids from the link store.
 
         returns the team id on success, None if the name is taken,
-        False if anyone is unlinked or already registered."""
+        False if anyone is unlinked, already registered, or the roster
+        does not match the season's team size."""
         captain_discord_id = str(captain_discord_id)
         invited_members = [str(x) for x in invited_members]
 
         if captain_discord_id in invited_members or len(set(invited_members)) != len(invited_members):
-            # a person cannot be in a team twice.
+            # a person cannot be in a team twice, and the captain cannot invite himself.
+            return False
+
+        expected_team = _season_team_size(self.season_id)
+        if expected_team and len(invited_members) + 1 != expected_team:
             return False
 
         size = len(invited_members) + 1
@@ -244,7 +259,11 @@ class Registration(Storage):
         return captain
 
     def decline(self, discord_id: str) -> TeamSchema | None:
-        """removes the member from their team, and records a re-invite cooldown."""
+        """removes the member from their team, and records a re-invite cooldown.
+        refuses once the team is fully verified."""
+        team = self.team_of(discord_id)
+        if team and team.status == TeamStatus.VERIFIED:
+            return None
         return self._remove_member(discord_id, cooldown=True)
 
     def leave(self, discord_id: str) -> TeamSchema | None:
@@ -289,6 +308,16 @@ class Registration(Storage):
         self.commit(db)
         return True
 
+    def set_invitation_message(self, team_id: str, message_id: int) -> bool:
+        """remembers the tracked invitation message inside the team's thread."""
+        db = self.read()
+        team = db.teams.get(team_id)
+        if not team:
+            return False
+        team.invitation_message_id = int(message_id)
+        self.commit(db)
+        return True
+
     def accept(self, discord_id: str) -> bool | None:
         """marks an invited member as accepted. None when the invitation expired."""
         discord_id = str(discord_id)
@@ -302,6 +331,8 @@ class Registration(Storage):
             return False
         if self.is_expired(team):
             return None
+        if team.status == TeamStatus.VERIFIED:
+            return False
 
         for member in team.members:
             if member.discord_id == discord_id:
@@ -337,14 +368,19 @@ class Registration(Storage):
                 if member.device_uuid:
                     return "already"
                 member.device_uuid = device_uuid
-                # save in players map for avoiding duplications.
-                # check if everyone on the team has verified.
-                if all(m.device_uuid for m in team.members):
+                all_verified = all(m.device_uuid for m in team.members)
+                if all_verified:
                     # update the team status
                     team.status = TeamStatus.VERIFIED
-                    # tell the bot first, so it can refresh the panel and archive the thread.
-                    send_event("team_verified", season_id=self.season_id, team_id=team_id)
-                    # the mention is the team role for team seasons, or the captain for solos.
+                # commit first, so the bot reads fresh state when it handles the event.
+                self.commit(db)
+
+                # notify the bot on every verify, so the invitation view can
+                # show who is left to verify in real time.
+                send_event("team_verified", season_id=self.season_id, team_id=team_id)
+
+                if all_verified:
+                    # the registration card only fires once, on the last member.
                     mention = f"<@&{team.role_id}>" if team.role_id else f"<@{team.captain}>"
                     runner.run(data={
                         "type": "registration",
@@ -352,7 +388,6 @@ class Registration(Storage):
                         "season_id": self.season_id,
                         "mention": mention,
                     })
-                self.commit(db)
                 return True
         return "not_registered"
 

@@ -399,6 +399,7 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
     def __init__(self, season_id: str, size: int):
         super().__init__()
         self.season_id = season_id
+        self.expected = size
         self.select = ui.Label(
             text="Select your teammates",
             component=ui.UserSelect(
@@ -494,9 +495,23 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
             return
 
         invited_members = self.select.component.values
-        if any(member.bot or member.id == interaction.user.id for member in invited_members):
+
+        if len(invited_members) != self.expected:
             await interaction.response.send_message(
-                "You cannot invite bots or yourself.", ephemeral=True
+                f"Select exactly {self.expected} teammate(s) for this format.",
+                ephemeral=True,
+            )
+            return
+
+        if any(member.id == interaction.user.id for member in invited_members):
+            await interaction.response.send_message(
+                "You cannot include yourself as a teammate.", ephemeral=True
+            )
+            return
+
+        if any(member.bot for member in invited_members):
+            await interaction.response.send_message(
+                "You cannot invite bots as teammates.", ephemeral=True
             )
             return
 
@@ -525,7 +540,7 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
 
         if not team_id:
             await interaction.followup.send(
-                "Failed to register. One of you might already be on another team.",
+                "Failed to register. Check the roster size and make sure nobody is on another team.",
                 ephemeral=True,
             )
             return
@@ -552,7 +567,7 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
 
         target = thread if thread else interaction.channel
         try:
-            await target.send(
+            invitation_message = await target.send(
                 view=view,
                 allowed_mentions=allowed_mentions_for(interaction.user, *invited_members),
             )
@@ -565,6 +580,7 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
 
         if thread:
             registration.set_thread(team_id, thread.id)
+            registration.set_invitation_message(team_id, invitation_message.id)
 
         await interaction.followup.send(
             f"Team **{self.team_name.value}** created! "
@@ -578,7 +594,13 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
 
 
 class TeamInvitationView(ui.LayoutView):
-    """accept or reject a team invitation, rendered with components v2."""
+    """accept or reject a team invitation, rendered with components v2.
+
+    three states, driven by the team's data:
+      - IN_INVITATION   -- not everyone has accepted. buttons enabled.
+      - UNVERIFIED      -- everyone accepted. buttons disabled, per-member verify shown.
+      - VERIFIED        -- everyone verified. no buttons at all, view is final.
+    """
 
     def __init__(self, team_id: str, invite_text: str = "", season_id: str = ""):
         super().__init__(timeout=None)
@@ -600,53 +622,116 @@ class TeamInvitationView(ui.LayoutView):
         season = tournament.get_season(season_id) if int(season_id or "0") else None
         size = season.type.count if season else 0
 
-        container = ui.Container()
+        if team is None:
+            container = ui.Container()
+            container.add_item(ui.TextDisplay(f"### Team invitation — **{self.team_id}**"))
+            container.add_item(ui.TextDisplay("*This invitation is no longer active.*"))
+            self.add_item(container)
+            return
+
+        all_accepted = all(m.accepted for m in team.members)
+        all_verified = all(m.device_uuid for m in team.members)
+        verified_count = sum(1 for m in team.members if m.device_uuid)
+        total = len(team.members)
+
+        # reconstruct the invitation lead-in for messages that predate the field.
+        if not self.invite_text:
+            invited = [m for m in team.members if m.discord_id != team.captain]
+            if invited:
+                mentions = " ".join(f"<@{m.discord_id}>" for m in invited)
+                self.invite_text = (
+                    f"{mentions}, you have been invited to join **{team.id}** "
+                    f"by <@{team.captain}>."
+                )
+
+        container = ui.Container(
+            accent_color=discord.Color.green() if all_verified else discord.Color.blurple()
+        )
 
         if self.invite_text:
             container.add_item(ui.TextDisplay(self.invite_text))
             container.add_item(ui.Separator())
 
-        container.add_item(ui.TextDisplay(f"### 🎫  Team invitation — **{self.team_id}**"))
+        container.add_item(ui.TextDisplay(f"### Team invitation — **{team.id}**"))
 
-        if team is None:
-            container.add_item(ui.TextDisplay("*This invitation is no longer active.*"))
+        if all_verified:
+            container.add_item(
+                ui.TextDisplay("Everyone has joined and verified. Team is ready.")
+            )
+            container.add_item(ui.Separator())
+        elif all_accepted:
+            container.add_item(
+                ui.TextDisplay("Everyone has joined. Waiting for verification.")
+            )
+            container.add_item(ui.Separator())
+
+        # per-member status
+        member_lines = []
+        for member in team.members:
+            is_captain = member.discord_id == team.captain
+            verified = bool(member.device_uuid)
+
+            if is_captain:
+                base = "Captain"
+            elif member.accepted:
+                base = "Joined"
+            else:
+                base = "Pending"
+
+            parts = [f"<@{member.discord_id}>", base]
+            if verified:
+                parts.append("Verified")
+            elif member.accepted or is_captain:
+                parts.append("Awaiting verification")
+            member_lines.append(" · ".join(parts))
+
+        container.add_item(ui.TextDisplay("\n".join(member_lines)))
+        container.add_item(ui.Separator())
+
+        meta = f"**Roster** {total}/{size}" if size else f"**Roster** {total}"
+        if all_verified:
+            meta += " · All verified"
+        elif all_accepted:
+            meta += f" · {verified_count}/{total} verified"
+        elif team.expires_at > 0:
+            meta += f" · **Expires** <t:{int(team.expires_at)}:R>"
+        container.add_item(ui.TextDisplay(meta))
+
+        # ---- buttons ----
+        if all_verified:
+            # fully locked down: no buttons at all, view is final.
             self.add_item(container)
             return
 
-        member_lines = []
-        for member in team.members:
-            if member.discord_id == team.captain:
-                member_lines.append(f"👑 <@{member.discord_id}>  —  *Captain*")
-            elif member.accepted:
-                member_lines.append(f"✅ <@{member.discord_id}>  —  *Joined*")
-            else:
-                member_lines.append(f"⏳ <@{member.discord_id}>  —  *Pending*")
-        container.add_item(ui.TextDisplay("\n".join(member_lines) or "*No members.*"))
-        container.add_item(ui.Separator())
+        if all_accepted:
+            # everyone joined; declining via this view is no longer possible.
+            accept = ui.Button(
+                label="Accept",
+                style=ButtonStyle.success,
+                custom_id=f"tiv;accept;{self.team_id}",
+                disabled=True,
+            )
+            decline = ui.Button(
+                label="Decline",
+                style=ButtonStyle.danger,
+                custom_id=f"tiv;decline;{self.team_id}",
+                disabled=True,
+            )
+        else:
+            accept = ui.Button(
+                label="Accept",
+                style=ButtonStyle.success,
+                custom_id=f"tiv;accept;{self.team_id}",
+            )
+            accept.callback = self.accept_btn
+            decline = ui.Button(
+                label="Decline",
+                style=ButtonStyle.danger,
+                custom_id=f"tiv;decline;{self.team_id}",
+            )
+            decline.callback = self.decline_btn
 
-        meta = f"**Roster** {len(team.members)}/{size}" if size else f"**Roster** {len(team.members)}"
-        if team.expires_at > 0:
-            meta += f"   •   **Expires** <t:{int(team.expires_at)}:R>"
-        if team.status:
-            meta += f"   •   **Status** `{team.status}`"
-        container.add_item(ui.TextDisplay(meta))
-
-        accept = ui.Button(
-            label="Accept",
-            style=ButtonStyle.success,
-            custom_id=f"tiv;accept;{self.team_id}",
-            emoji="✅",
-        )
-        accept.callback = self.accept_btn
-        decline = ui.Button(
-            label="Decline",
-            style=ButtonStyle.danger,
-            custom_id=f"tiv;decline;{self.team_id}",
-            emoji="❌",
-        )
-        decline.callback = self.decline_btn
         container.add_item(ui.ActionRow(accept, decline))
-
         self.add_item(container)
 
     async def _refresh(self, interaction: Interaction) -> None:
@@ -678,6 +763,12 @@ class TeamInvitationView(ui.LayoutView):
         if user_team_id != team_id:
             await interaction.response.send_message(
                 "You are not on the invitation list for this team.", ephemeral=True
+            )
+            return
+
+        if team.status == TeamStatus.VERIFIED:
+            await interaction.response.send_message(
+                "Your team is already verified.", ephemeral=True
             )
             return
 
@@ -741,6 +832,13 @@ class TeamInvitationView(ui.LayoutView):
         if team.captain == str(interaction.user.id):
             await interaction.response.send_message(
                 "You are the captain, you cannot decline your own team.", ephemeral=True
+            )
+            return
+
+        if team.status == TeamStatus.VERIFIED:
+            await interaction.response.send_message(
+                "Your team is already verified. Contact an admin if something needs to change.",
+                ephemeral=True,
             )
             return
 

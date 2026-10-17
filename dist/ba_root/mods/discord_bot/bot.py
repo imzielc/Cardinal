@@ -44,6 +44,9 @@ class DiscordBot(commands.Bot):
         await self.add_cog(TournamentCommands(self))
         await self.add_cog(HeldPosts(self))
         await self.add_cog(TeamInvitationWatcher(self))
+        # one-shot migration: backfills invitation_message_id for pre-update teams
+        # and re-renders any past-invitation views to the current design.
+        asyncio.create_task(self._run_startup_migrations())
 
     def _restore_invitations(self) -> None:
         """re-registers the invitation buttons of the pending teams, so they work after a restart."""
@@ -54,6 +57,18 @@ class DiscordBot(commands.Bot):
         for team_id, team in Registration(season_id=season_id).read().teams.items():
             if team.status == TeamStatus.IN_INVITATION:
                 self.add_view(TeamInvitationView(team_id=team_id, season_id=season_id))
+
+    async def _run_startup_migrations(self) -> None:
+        """startup work that needs a fully-ready bot. idempotent, safe to run every start."""
+        try:
+            await self.wait_until_ready()
+        except Exception:
+            return
+        try:
+            from discord_bot.events import migrate_invitation_views
+            await migrate_invitation_views(self)
+        except Exception as e:
+            print(f"Discord: invitation migration failed: {e}")
 
     async def on_app_cmd_error(
         self, interaction: Interaction, error: app_commands.AppCommandError

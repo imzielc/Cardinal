@@ -5,6 +5,7 @@ from utilities.endvote import EndVote
 from utilities.team_balancer import check_team_balance
 from time import monotonic
 from utilities import server_text
+import bascenev1
 
 @patch_method(Activity, "end", initial=True)
 def end(*args, **kwargs):
@@ -19,6 +20,17 @@ def on_begin(*args, **kwargs):
     server_text.make_server_text()
     # don't allow player's to start endvote if the game just started, for that. log the time.
     EndVote.relaxation = monotonic() + 60  # don't allow for initial 60 seconds
+
+    # we need to store what activity it is, so we can avoid counting kills in the wrong activity for tournament matches.
+    activity = bascenev1.getactivity()
+    actlow = str(activity).lower()
+    if "elimination" in actlow:
+        bascenev1.is_elimination = True
+        return
+    elif "scorescreen" in actlow:
+        return
+
+    bascenev1.is_elimination = False
 
 @patch_method(EliminationGame, "on_player_leave")
 def on_player_leave(self, player):
