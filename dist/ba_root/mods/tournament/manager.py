@@ -22,6 +22,10 @@ class Manager:
 
         self.active_match: PendingMatchSchema | None = None
 
+        # set while a match-completion or pause transition is pending, so a
+        # second end_tournament_session call does not schedule a second timer.
+        self._transitioning: bool = False
+
     def initialize(self, season_id: str):
         """initializes the manager."""
         self.season_id = season_id
@@ -149,7 +153,24 @@ class Manager:
 
         return result
 
+    def _captain_account_of(self, team_name: str) -> str | None:
+        """the game account id of the team's captain, or None if unresolvable."""
+        team_schema = self.brackets.get_team(team_name)
+        if not team_schema:
+            return None
+        for member in team_schema.members:
+            if member.discord_id == team_schema.captain and member.account_id:
+                return member.account_id
+        return None
+
     def handle_player_pause(self, account_id: str) -> dict:
+        """only captains can request a pause, and both captains must agree."""
+        if self._transitioning:
+            return {
+                "status": "error",
+                "message": "The match is ending."
+            }
+
         if not self.active_match:
             return {
                 "status": "error",
@@ -162,6 +183,19 @@ class Manager:
                 "message": "You are not a member of the active match."
             }
 
+        # verify that the caller is a captain.
+        captains = set()
+        for team in self.active_match.match.teams:
+            captain_account = self._captain_account_of(team.name)
+            if captain_account:
+                captains.add(captain_account)
+
+        if account_id not in captains:
+            return {
+                "status": "error",
+                "message": "Only the team captain can request a pause."
+            }
+
         match_id = self.active_match.key
         self.pause_players.setdefault(match_id, set())
         if account_id in self.pause_players[match_id]:
@@ -172,10 +206,13 @@ class Manager:
 
         result = {"status": "success", "message": "You have been marked for match pause."}
         self.pause_players[match_id].add(account_id)
-        if self.pause_players[match_id] == set(self.active_match.players):
+
+        # both captains have to agree.
+        if captains and captains.issubset(self.pause_players[match_id]):
             self.save_score()
-            # if all players are marked for pause, we can pause the match.
-            # for now, we will just restart the server.
+            # same as completion from here on: drop the active match and
+            # transition back to lobby. scores are saved above, so resuming
+            # via /ready picks them up again.
             self.end_tournament_session()
             result["pause"] = True
         return result
@@ -244,14 +281,50 @@ class Manager:
             session.setactivity(bascenev1.newactivity(TournamentTransitionActivity))
 
     def end_tournament_session(self) -> None:
-        """ends the tournament session."""
-        bascenev1.broadcastmessage("Server will restart in 10 seconds.")
+        """schedules the transition back to lobby for both completion and pause."""
+        if self._transitioning:
+            return
+        self._transitioning = True
+        bascenev1.broadcastmessage("Server will return to the lobby in 30 seconds.")
         with bascenev1.ContextRef.empty():
-            bascenev1.apptimer(10.0, self._shutdown)
+            bascenev1.apptimer(30.0, self._return_to_lobby)
 
-    def _shutdown(self) -> None:
+    def _return_to_lobby(self) -> None:
+        """pops the tournament env and transitions back to a regular session.
+
+        only the concluded match's state is removed. other pending matches keep
+        their player assignments and ready state, so a player who was already
+        ready for their upcoming match does not need to /ready again.
+        """
+        from tournament.session import TournamentSession
+
+        self._transitioning = False
         os.environ.pop("TOURNAMENT_MATCH", None)
-        bascenev1.app.classic.server._execute_shutdown()
+
+        if self.active_match:
+            match_id = self.active_match.key
+
+            # remove only THIS match's players from the account -> match map.
+            # other pending matches keep their player assignments.
+            for account_id in [
+                aid for aid, (mid, _) in self.players.items() if mid == match_id
+            ]:
+                del self.players[account_id]
+
+            # drop this match's per-match entries. other matches keep theirs.
+            self.pending_matches.pop(match_id, None)
+            self.ready_players.pop(match_id, None)
+            self.pause_players.pop(match_id, None)
+
+        self.active_match = None
+
+        session = bascenev1.get_foreground_host_session()
+        if not isinstance(session, TournamentSession):
+            return
+
+        from .activity import TeamSessionTransitionActivity
+        with session.context:
+            session.setactivity(bascenev1.newactivity(TeamSessionTransitionActivity))
 
 
 manager = Manager()

@@ -12,6 +12,18 @@ from tournament.registration import Registration
 from tournament.graphics import runner
 from tournament.schema import BracketsMetaSchema, MatchSchema, MatchTeamSchema, GroupStageSchema, GroupSchema, RoundSchema, TeamSchema
 
+def _round_label(match: MatchSchema) -> str:
+    """human label for a knockout match, based on its bracket and round id."""
+    if match.bracket == "winners":
+        return f"Winners Round {match.round_id}"
+    if match.bracket == "losers":
+        return f"Losers Round {match.round_id}"
+    if match.bracket == "grand-final":
+        return "Grand Final"
+    if match.bracket == "main-stage":
+        return match.round_id.replace("-", " ").title()
+    return ""
+
 class Brackets(Storage):
     """generates brackets and handles the rounds."""
 
@@ -37,15 +49,48 @@ class Brackets(Storage):
             matches = self.list_matches()
         except Exception:
             return
+        brackets = self.read_meta()
+        in_group = "group-stage" in brackets.active_rounds
+
+        if in_group:
+            try:
+                gs = self.read_gs()
+            except Exception:
+                gs = None
+        else:
+            gs = None
+
         payload = []
         for key, m in matches.items():
             if m.is_bye:
                 continue
-            payload.append({
+            entry = {
                 "key": key,
                 "team1": m.teams[0].name or "TBD",
                 "team2": m.teams[1].name or "TBD",
-            })
+            }
+
+            if in_group and gs and m.group_id:
+                group = gs.groups.get(m.group_id)
+                if group:
+                    stats_by_name = {s["id"]: s for s in group.standings_sorted}
+                    entry["stage"] = "group"
+                    entry["standings"] = {}
+                    for name in (m.teams[0].name, m.teams[1].name):
+                        if name and name in stats_by_name:
+                            s = stats_by_name[name]
+                            entry["standings"][name] = {
+                                "wins": s.get("wins", 0),
+                                "loses": s.get("loses", 0),
+                                "points": s.get("points", 0),
+                                "diff": s.get("diff", 0),
+                            }
+            else:
+                entry["stage"] = "knockout"
+                entry["round_label"] = _round_label(m)
+
+            payload.append(entry)
+
         send_event("round_started", season_id=self.season_id, matches=payload)
 
     def generate_group_stage(self, teams: list) -> None | bool:

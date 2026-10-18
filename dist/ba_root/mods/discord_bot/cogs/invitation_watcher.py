@@ -5,6 +5,7 @@ from traceback import format_exc
 import discord
 from discord.ext import commands, tasks
 
+from discord_bot.events import promote_waitlist_one
 from discord_bot.ui import allowed_mentions_for
 from tournament import tournament
 from tournament.registration import Registration
@@ -44,6 +45,8 @@ class TeamInvitationWatcher(commands.Cog):
                     await self._cleanup(expired, season)
                 except Exception:
                     print(f"Discord: could not clean up expired invitation {expired.id}:\n{format_exc()}")
+                # a slot just opened: promote the top of the waitlist if any.
+                await promote_waitlist_one(self.bot, season_id)
         except Exception:
             print(f"Discord: invitation watcher failed:\n{format_exc()}")
 

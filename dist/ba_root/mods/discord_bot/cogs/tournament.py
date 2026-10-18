@@ -9,7 +9,7 @@ from discord import Interaction, app_commands
 from discord.ext import commands
 
 from discord_bot.client import GameClient
-from discord_bot.events import cleanup_season
+from discord_bot.events import cleanup_season, promote_waitlist_one
 from discord_bot.helpers import require
 from discord_bot.ui import (
     CaptainRegistrationModal,
@@ -142,7 +142,6 @@ class TournamentCommands(
                 content="Cancelling the tournament...", view=None
             )
 
-            # clean up roles and match threads before we lose the season id.
             await cleanup_season(self.bot, season_id)
 
             tournament.cancel_season(season_id)
@@ -257,7 +256,6 @@ class TournamentCommands(
             )
             return
 
-        # add the new member to the team role.
         if team.role_id:
             try:
                 team_role = interaction.guild.get_role(team.role_id)
@@ -291,7 +289,6 @@ class TournamentCommands(
                     view=view,
                     allowed_mentions=allowed_mentions_for(user),
                 )
-                # the latest invitation is the one on_team_verified will edit.
                 registration.set_invitation_message(team.id, message.id)
             except discord.HTTPException:
                 pass
@@ -363,7 +360,6 @@ class TournamentCommands(
                         except discord.HTTPException:
                             pass
 
-                # delete the team role.
                 if current.role_id:
                     try:
                         team_role = interaction.guild.get_role(current.role_id)
@@ -384,6 +380,9 @@ class TournamentCommands(
                 await confirm_interaction.followup.send(
                     f"Team **{team.id}** dissolved.", ephemeral=True
                 )
+
+                # a slot just opened: promote the top of the waitlist if any.
+                await promote_waitlist_one(self.bot, season_id)
             else:
                 updated = Registration(season_id=season_id).leave(
                     str(interaction.user.id)
@@ -395,7 +394,6 @@ class TournamentCommands(
                     except discord.HTTPException:
                         pass
 
-                # remove from the team role.
                 if current.role_id:
                     try:
                         team_role = interaction.guild.get_role(current.role_id)
@@ -522,6 +520,33 @@ class TournamentCommands(
             lines.append(line)
         message_text = "\n".join(lines)
         await interaction.response.send_message(message_text, ephemeral=True)
+
+    @app_commands.command(name="waitlist")
+    @require(Authority.LEADER)
+    async def show_waitlist(self, interaction: Interaction) -> None:
+        """lists the teams queued for the active season."""
+        season_id = tournament.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament season opened currently.", ephemeral=True
+            )
+            return
+
+        from tournament.waitlist import Waitlist
+        wl = Waitlist(season_id)
+        entries = wl.read().entries
+        if not entries:
+            await interaction.response.send_message(
+                "The waitlist is empty.", ephemeral=True
+            )
+            return
+
+        lines = [f"**Waitlist for season {season_id}:**\n"]
+        for idx, entry in enumerate(entries, start=1):
+            lines.append(
+                f"`{idx}.` **{entry.team_name}** — <@{entry.captain_discord_id}>"
+            )
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="start")
     @require(Authority.LEADER)

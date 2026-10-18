@@ -105,7 +105,8 @@ class Registration(Storage):
         """removes an expired team, and any traces of its members. returns the removed team.
 
         verified teams are never expired — they've done the work, deletion here
-        would undo their registration and take their role and thread with it.
+        would undo their registration and (in the watcher path) take their role
+        and thread with it.
         """
         db = self.read()
         team = db.teams.get(team_id)
@@ -420,3 +421,49 @@ class Registration(Storage):
                 self.commit(db)
                 return True
         return False
+
+    # ---- waitlist promotion ----
+
+    def promote_from_waitlist(self, slots: int = 1) -> list[dict]:
+        """pops up to `slots` entries off the waitlist and tries to register them.
+
+        only runs while the season is in REGISTRATION. entries that fail to
+        register (name taken, someone got registered elsewhere) are dropped,
+        not retried — the captain can rejoin the waitlist if they want.
+
+        returns one dict per successful promotion:
+          {"team_id": str, "captain_discord_id": str}
+        the caller (bot) handles role creation, thread, and pings.
+        """
+        try:
+            from tournament.storage import tournament as tournament_storage
+            season = tournament_storage.get_season(self.season_id)
+        except Exception:
+            return []
+        if season is None or season.stage != "REGISTRATION":
+            return []
+
+        try:
+            from tournament.waitlist import Waitlist
+            wl = Waitlist(self.season_id)
+        except Exception:
+            return []
+
+        promoted: list[dict] = []
+        for _ in range(max(0, slots)):
+            entry = wl.pop_next()
+            if entry is None:
+                break
+            team_id = self.register(
+                team_name=entry.team_name,
+                captain_discord_id=entry.captain_discord_id,
+                invited_members=entry.invited_member_ids,
+            )
+            if not team_id:
+                # name taken, or someone is no longer linked / already registered.
+                continue
+            promoted.append({
+                "team_id": team_id,
+                "captain_discord_id": entry.captain_discord_id,
+            })
+        return promoted

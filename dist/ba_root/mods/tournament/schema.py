@@ -21,7 +21,9 @@ class BaseSchema:
         """validates the data into the schema."""
         if not data:
             return cls()
-        # pydantic is imported here, not at module load
+        # pydantic is imported here, not at module load: its cold import
+        # stalls the main thread long enough for the boot GC pass and the
+        # HostSession::Update() check to complain during the mod scan.
         from pydantic import TypeAdapter
         return TypeAdapter(cls).validate_python(data)
 
@@ -208,3 +210,20 @@ class MatchThreadsSchema(BaseSchema):
     """
     season_id: str = ""
     threads: dict[str, int] = field(default_factory=dict)
+
+
+# ---- waitlist (bot side, per season) ----
+
+@dataclass
+class WaitlistEntrySchema(BaseSchema):
+    """one queued team waiting for a slot to open up."""
+    captain_discord_id: str
+    team_name: str
+    invited_member_ids: list[str] = field(default_factory=list)
+    added_at: float = 0.0
+
+
+@dataclass
+class WaitlistSchema(BaseSchema):
+    """queued teams for a season, oldest first."""
+    entries: list[WaitlistEntrySchema] = field(default_factory=list)

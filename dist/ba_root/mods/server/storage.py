@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 MODS_DIR: Path = Path(__file__).resolve().parent.parent
+
+BACKUP_COUNT = 3
 
 
 class Storage:
@@ -43,6 +46,21 @@ class Storage:
     def commit(self, data: dict | list, external_path: Path | None = None) -> None:
         """commits the data to the file."""
         target_path = external_path or self.path
+
+        # rotate: old .2 -> .3, old .1 -> .2, current file -> .1.
+        # all renames are metadata-only, cheap even on slow disks.
+        if target_path.exists():
+            base = str(target_path)
+            oldest = Path(f"{base}.{BACKUP_COUNT}.bak")
+            if oldest.exists():
+                oldest.unlink()
+            for n in range(BACKUP_COUNT - 1, 0, -1):
+                src = Path(f"{base}.{n}.bak")
+                dst = Path(f"{base}.{n + 1}.bak")
+                if src.exists():
+                    os.replace(src, dst)
+            os.replace(target_path, Path(f"{base}.1.bak"))
+
         with target_path.open("w") as f:
             json.dump(data, f, indent=4)
 

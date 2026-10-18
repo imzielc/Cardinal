@@ -14,7 +14,14 @@ import threading
 import discord
 from discord.ext import commands
 
-from discord_bot.ui import TeamInvitationView, refresh_register_panel, team_role_name
+from discord_bot.ui import (
+    TeamInvitationView,
+    allowed_mentions_for,
+    create_team_role,
+    create_team_thread,
+    refresh_register_panel,
+    team_role_name,
+)
 from server import config
 from tournament import tournament
 from tournament.match_threads import match_threads
@@ -132,7 +139,6 @@ async def _delete_role(bot: commands.Bot, role_id: int) -> None:
 async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
     """deletes every discord trace of a season: participant role, group roles, team roles,
     invitation threads, and match threads."""
-    # 1. the participant role (created at /tournament create).
     try:
         season = tournament.get_season(season_id)
     except Exception:
@@ -140,7 +146,6 @@ async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
     if season:
         await _delete_role(bot, season.participant_role_id)
 
-    # 2. group roles (created at /tournament start when the group stage runs).
     try:
         from tournament.brackets import Brackets
         gs = Brackets(season_id=season_id).read_gs()
@@ -149,7 +154,6 @@ async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
     except Exception:
         pass
 
-    # 3. team roles and invitation threads.
     try:
         registration = Registration(season_id=season_id).read()
     except Exception:
@@ -159,7 +163,6 @@ async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
             await _delete_thread(bot, team.thread_id)
             await _delete_role(bot, team.role_id)
 
-    # 4. match threads.
     for tid in match_threads.get(season_id).values():
         await _delete_thread(bot, tid)
     match_threads.clear()
@@ -200,6 +203,147 @@ async def migrate_team_roles(bot: commands.Bot) -> None:
             await role.edit(name=expected)
         except discord.HTTPException:
             pass
+
+
+# ---- waitlist promotion ----
+
+
+async def announce_waitlist_promotion(bot: commands.Bot, season_id: str, info: dict) -> None:
+    """a waitlisted team got promoted into a real slot. sets up their presence on discord:
+    participant role on the captain, team role, private thread, invitation message.
+
+    called from `/tournament leave` and the invitation watcher, after the slot
+    was freed by a team dissolving or expiring.
+    """
+    team_id = info.get("team_id")
+    captain_id = info.get("captain_discord_id")
+    if not team_id or not captain_id:
+        return
+
+    registration = Registration(season_id=season_id)
+    team = registration.get_team(team_id)
+    if not team:
+        return
+
+    season = tournament.get_season(season_id)
+    if not season:
+        return
+
+    # locate the captain in any of the bot's guilds.
+    guild = None
+    captain = None
+    for g in bot.guilds:
+        member = g.get_member(int(captain_id))
+        if member:
+            guild = g
+            captain = member
+            break
+    if guild is None or captain is None:
+        return
+
+    # participant role.
+    if season.participant_role_id:
+        participant = guild.get_role(season.participant_role_id)
+        if participant:
+            try:
+                await captain.add_roles(participant)
+            except discord.HTTPException:
+                pass
+
+    # team role.
+    member_ids = []
+    for m in team.members:
+        try:
+            member_ids.append(int(m.discord_id))
+        except (TypeError, ValueError):
+            pass
+    team_role_id = await create_team_role(guild, team_id, member_ids)
+    if team_role_id:
+        registration.set_role(team_id, team_role_id)
+
+    # the thread lives in the register panel's channel, same as manual registrations.
+    channel_id, _ = tournament.get_panel()
+    if not channel_id:
+        return
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    except Exception:
+        return
+
+    invited_users = []
+    for m in team.members:
+        if m.discord_id == str(captain_id):
+            continue
+        member = guild.get_member(int(m.discord_id))
+        if member:
+            invited_users.append(member)
+
+    thread = await create_team_thread(
+        channel, team_id, season_id, captain, invited_users
+    )
+    if thread is None:
+        return
+    registration.set_thread(team_id, thread.id)
+
+    invite_text = (
+        f"{' '.join(u.mention for u in invited_users) or 'Welcome'}, "
+        f"your team **{team_id}** was moved from the waitlist into the tournament. "
+        f"Please accept the invitation."
+    )
+    view = TeamInvitationView(team_id=team_id, invite_text=invite_text, season_id=season_id)
+    try:
+        message = await thread.send(
+            view=view,
+            allowed_mentions=allowed_mentions_for(captain, *invited_users),
+        )
+        registration.set_invitation_message(team_id, message.id)
+    except Exception:
+        pass
+
+    await refresh_register_panel(bot)
+
+
+async def promote_waitlist_one(bot: commands.Bot, season_id: str) -> None:
+    """asks the registration store to promote one waitlisted team, then announces it."""
+    try:
+        promoted = Registration(season_id=season_id).promote_from_waitlist(slots=1)
+    except Exception as e:
+        print(f"Discord: waitlist promotion failed: {e}")
+        return
+    for info in promoted:
+        try:
+            await announce_waitlist_promotion(bot, season_id, info)
+        except Exception as e:
+            print(f"Discord: could not announce waitlist promotion: {e}")
+
+
+# ---- match thread formatting ----
+
+
+def _match_header(payload_match: dict) -> str:
+    """the second line of the thread's first message: round label, or standings."""
+    stage = payload_match.get("stage")
+    team1 = payload_match.get("team1") or "TBD"
+    team2 = payload_match.get("team2") or "TBD"
+
+    if stage == "group":
+        standings = payload_match.get("standings") or {}
+        lines = []
+        for name in (team1, team2):
+            s = standings.get(name)
+            if s:
+                lines.append(
+                    f"{name} · {s['wins']}W-{s['loses']}L · {s['points']} pts · "
+                    f"{'+' if s['diff'] >= 0 else ''}{s['diff']} diff"
+                )
+            else:
+                lines.append(f"{name} · no standing")
+        return "Standings:\n" + "\n".join(lines)
+
+    label = payload_match.get("round_label")
+    if label:
+        return f"**{team1} vs {team2}** — {label} — coordinate your match timings here."
+    return f"**{team1} vs {team2}** — coordinate your match timings here."
 
 
 # ---- handlers ----
@@ -246,8 +390,6 @@ async def on_team_verified(bot: commands.Bot, payload: dict) -> None:
         except Exception:
             pass
     else:
-        # fallback for teams that predate the tracked message id. records the
-        # id so this is one-shot.
         try:
             message = await thread.send(
                 view=view,
@@ -264,7 +406,6 @@ async def on_round_started(bot: commands.Bot, payload: dict) -> None:
     if not int(season_id or "0"):
         return
 
-    # tear down the old round's threads.
     for tid in match_threads.get(season_id).values():
         await _delete_thread(bot, tid)
     match_threads.clear()
@@ -329,9 +470,10 @@ async def on_round_started(bot: commands.Bot, payload: dict) -> None:
 
             pings = " ".join(f"<@&{rid}>" for rid in role_ids)
             header = f"{pings}\n" if pings else ""
+            body = _match_header(match)
             try:
                 await thread.send(
-                    f"{header}**{team1_name} vs {team2_name}** — coordinate your match timings here.",
+                    f"{header}{body}",
                     allowed_mentions=discord.AllowedMentions(
                         roles=[discord.Object(id=rid) for rid in role_ids],
                         users=False,

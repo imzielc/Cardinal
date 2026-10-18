@@ -12,6 +12,7 @@ from server.enums import TeamStatus
 from tournament import tournament
 from tournament.link import link
 from tournament.registration import Registration
+from tournament.waitlist import Waitlist
 
 TEAM_NAME_MAX_LENGTH = 40
 THREAD_ARCHIVE_MINUTES = 1440
@@ -44,6 +45,25 @@ def parse_date(value: str) -> int | None:
         return int(dt.timestamp())
     except (ValueError, TypeError):
         return None
+
+
+def _expiry_label(expires_at: float) -> str:
+    """a compact human label for how much time a team has left before it expires.
+
+    shows hours for anything over an hour, minutes for anything under, and
+    "Expiring soon" in the last minute. matches the invite_expire_hours
+    setting directly rather than the relative timestamp discord would render.
+    """
+    remaining = expires_at - datetime.now(timezone.utc).timestamp()
+    if remaining <= 0:
+        return "**Expired**"
+    if remaining >= 3600:
+        hours = int(remaining // 3600)
+        return f"**Expires in** {hours}h"
+    if remaining >= 60:
+        minutes = int(remaining // 60)
+        return f"**Expires in** {minutes}m"
+    return "**Expiring soon**"
 
 
 async def refresh_register_panel(bot) -> None:
@@ -159,11 +179,86 @@ async def create_team_role(guild: Guild, team_name: str, member_ids: list[int]) 
     return role.id
 
 
+async def find_archived_thread(channel, name: str):
+    """looks for an archived private thread with this name in the channel."""
+    try:
+        async for thread in channel.archived_threads(limit=100, private=True):
+            if thread.name == name and thread.archived:
+                return thread
+    except (discord.Forbidden, discord.HTTPException, AttributeError):
+        pass
+    return None
+
+
+async def create_team_thread(channel, team_name: str, season_id: str,
+                             captain_user, invited_members: list):
+    """returns the private thread for the team, reusing an archived one if it exists."""
+    if channel is None or not hasattr(channel, "create_thread"):
+        return None
+
+    name = thread_name(team_name, season_id)
+
+    existing = await find_archived_thread(channel, name)
+    if existing is not None:
+        try:
+            if existing.locked:
+                await existing.edit(archived=False, locked=False)
+            else:
+                await existing.edit(archived=False)
+            await existing.send("**Team re-created.** Fresh invitation below.")
+            try:
+                await existing.add_user(captain_user)
+            except discord.HTTPException:
+                pass
+            for member in invited_members:
+                try:
+                    await existing.add_user(member)
+                except discord.HTTPException:
+                    pass
+            return existing
+        except discord.HTTPException:
+            pass
+
+    try:
+        thread = await channel.create_thread(
+            name=name,
+            type=discord.ChannelType.private_thread,
+            invitable=False,
+            auto_archive_duration=THREAD_ARCHIVE_MINUTES,
+        )
+    except (discord.Forbidden, discord.HTTPException, TypeError):
+        return None
+
+    try:
+        await thread.add_user(captain_user)
+    except discord.HTTPException:
+        try:
+            await thread.delete()
+        except discord.HTTPException:
+            pass
+        return None
+
+    for member in invited_members:
+        try:
+            await thread.add_user(member)
+        except discord.HTTPException:
+            pass
+    return thread
+
+
 # ---- register panel ----
 
 
 class RegisterView(ui.LayoutView):
-    """the persistent registration panel. rebuilt from state every time it is shown."""
+    """the persistent registration panel. rebuilt from state every time it is shown.
+
+    the button's label reflects the current state:
+      - no season:         disabled
+      - regs open:         "Register"
+      - regs closed:       "Join Waitlist"
+    the actual behavior is decided in the modal on submit, so a stale button
+    can't produce a wrong outcome.
+    """
 
     def __init__(self) -> None:
         super().__init__(timeout=None)
@@ -174,7 +269,7 @@ class RegisterView(ui.LayoutView):
 
         season_id = tournament.active_season
         season = tournament.get_season(season_id) if int(season_id) else None
-        open_ = season is not None and tournament.are_registrations_open
+        regs_open = season is not None and tournament.are_registrations_open
 
         container = ui.Container(accent_color=discord.Color.blurple())
         container.add_item(ui.TextDisplay("### 🏆  Tournament Registration"))
@@ -206,17 +301,24 @@ class RegisterView(ui.LayoutView):
             except Exception:
                 pass
 
+            waitlist_count = 0
+            try:
+                waitlist_count = len(Waitlist(season_id))
+            except Exception:
+                pass
+
             container.add_item(
                 ui.TextDisplay(
                     f"**Season** `{season_id}`\n"
                     f"**Format** {type_str} • {series_str}\n"
                     f"**Mode** {mode_str}\n"
-                    f"**Teams** {total} registered • {verified} verified"
+                    f"**Teams** {total} registered • {verified} verified\n"
+                    f"**Waitlist** {waitlist_count} queued"
                 )
             )
             container.add_item(ui.Separator())
 
-            if open_:
+            if regs_open:
                 container.add_item(
                     ui.TextDisplay(
                         "Click the button below to sign up. "
@@ -229,18 +331,20 @@ class RegisterView(ui.LayoutView):
                     emoji="<:register:1560371261459267654>",
                     custom_id=REGISTER_BUTTON_ID,
                 )
-                button.callback = self.register_btn
             else:
                 container.add_item(
-                    ui.TextDisplay("🔒 Registrations are currently closed.")
+                    ui.TextDisplay(
+                        "🔒 Registrations are closed. Click below to join the waitlist — "
+                        "if a slot opens up you'll be promoted automatically."
+                    )
                 )
                 button = ui.Button(
-                    label="Register",
+                    label="Join Waitlist",
                     style=ButtonStyle.primary,
                     emoji="<:register:1560371261459267654>",
                     custom_id=REGISTER_BUTTON_ID,
-                    disabled=True,
                 )
+            button.callback = self.register_btn
 
         container.add_item(ui.ActionRow(button))
         self.add_item(container)
@@ -250,12 +354,6 @@ class RegisterView(ui.LayoutView):
         if not int(season_id):
             await interaction.response.send_message(
                 "There is no tournament ongoing right now.", ephemeral=True
-            )
-            return
-
-        if not tournament.are_registrations_open:
-            await interaction.response.send_message(
-                "Registrations are closed.", ephemeral=True
             )
             return
 
@@ -363,6 +461,27 @@ class SoloRegistrationModal(ui.Modal, title="Tournament Solo Registration."):
             )
             return
 
+        # state decides: open -> register, closed -> waitlist.
+        if not tournament.are_registrations_open:
+            wl = Waitlist(self.season_id)
+            if wl.is_waitlisted(str(interaction.user.id)):
+                await interaction.response.send_message(
+                    "You are already on the waitlist.", ephemeral=True
+                )
+                return
+            if not wl.add(str(interaction.user.id), self.team_name.value, []):
+                await interaction.response.send_message(
+                    "Could not add you to the waitlist.", ephemeral=True
+                )
+                return
+            pos = wl.position_of(str(interaction.user.id)) or 0
+            await interaction.response.send_message(
+                f"Registrations are closed. You've been added to the waitlist at position **{pos}**.",
+                ephemeral=True,
+            )
+            await refresh_register_panel(interaction.client)
+            return
+
         team_id = registration.register(
             team_name=self.team_name.value,
             captain_discord_id=str(interaction.user.id),
@@ -413,71 +532,6 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
             ),
         )
         self.add_item(self.select)
-
-    async def _find_archived_thread(self, channel, name: str):
-        """looks for an archived private thread with this name in the channel."""
-        try:
-            async for thread in channel.archived_threads(limit=100, private=True):
-                if thread.name == name and thread.archived:
-                    return thread
-        except (discord.Forbidden, discord.HTTPException, AttributeError):
-            pass
-        return None
-
-    async def _create_team_thread(self, interaction: Interaction, invited_members: list):
-        """returns the private thread for the team, reusing an archived one if it exists."""
-        channel = interaction.channel
-        if not hasattr(channel, "create_thread"):
-            return None
-
-        name = thread_name(self.team_name.value, self.season_id)
-
-        existing = await self._find_archived_thread(channel, name)
-        if existing is not None:
-            try:
-                if existing.locked:
-                    await existing.edit(archived=False, locked=False)
-                else:
-                    await existing.edit(archived=False)
-                await existing.send("**Team re-created.** Fresh invitation below.")
-                try:
-                    await existing.add_user(interaction.user)
-                except discord.HTTPException:
-                    pass
-                for member in invited_members:
-                    try:
-                        await existing.add_user(member)
-                    except discord.HTTPException:
-                        pass
-                return existing
-            except discord.HTTPException:
-                pass
-
-        try:
-            thread = await channel.create_thread(
-                name=name,
-                type=discord.ChannelType.private_thread,
-                invitable=False,
-                auto_archive_duration=THREAD_ARCHIVE_MINUTES,
-            )
-        except (discord.Forbidden, discord.HTTPException, TypeError):
-            return None
-
-        try:
-            await thread.add_user(interaction.user)
-        except discord.HTTPException:
-            try:
-                await thread.delete()
-            except discord.HTTPException:
-                pass
-            return None
-
-        for member in invited_members:
-            try:
-                await thread.add_user(member)
-            except discord.HTTPException:
-                pass
-        return thread
 
     async def on_submit(self, interaction: Interaction):
         registration = Registration(self.season_id)
@@ -530,12 +584,35 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
             )
             return
 
+        invited_ids = [str(m.id) for m in invited_members]
+
+        # state decides: open -> register, closed -> waitlist.
+        if not tournament.are_registrations_open:
+            wl = Waitlist(self.season_id)
+            if wl.is_waitlisted(str(interaction.user.id)):
+                await interaction.response.send_message(
+                    "You are already on the waitlist.", ephemeral=True
+                )
+                return
+            if not wl.add(str(interaction.user.id), self.team_name.value, invited_ids):
+                await interaction.response.send_message(
+                    "Could not add you to the waitlist.", ephemeral=True
+                )
+                return
+            pos = wl.position_of(str(interaction.user.id)) or 0
+            await interaction.response.send_message(
+                f"Registrations are closed. You've been added to the waitlist at position **{pos}**.",
+                ephemeral=True,
+            )
+            await refresh_register_panel(interaction.client)
+            return
+
         await interaction.response.defer(ephemeral=True)
 
         team_id = registration.register(
             team_name=self.team_name.value,
             captain_discord_id=str(interaction.user.id),
-            invited_members=[str(member.id) for member in invited_members],
+            invited_members=invited_ids,
         )
 
         if team_id is None:
@@ -562,7 +639,13 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
         if team_role_id:
             registration.set_role(team_id, team_role_id)
 
-        thread = await self._create_team_thread(interaction, invited_members)
+        thread = await create_team_thread(
+            interaction.channel,
+            self.team_name.value,
+            self.season_id,
+            interaction.user,
+            invited_members,
+        )
 
         team = registration.get_team(team_id)
         invite_text = (
@@ -640,7 +723,6 @@ class TeamInvitationView(ui.LayoutView):
         verified_count = sum(1 for m in team.members if m.device_uuid)
         total = len(team.members)
 
-        # reconstruct the invitation lead-in for messages that predate the field.
         if not self.invite_text:
             invited = [m for m in team.members if m.discord_id != team.captain]
             if invited:
@@ -699,7 +781,9 @@ class TeamInvitationView(ui.LayoutView):
         elif all_accepted:
             meta += f" · {verified_count}/{total} verified"
         elif team.expires_at > 0:
-            meta += f" · **Expires** <t:{int(team.expires_at)}:R>"
+            # explicit hours, matching invite_expire_hours instead of the
+            # relative "in a day" that <t:...:R> would produce.
+            meta += f" · {_expiry_label(team.expires_at)}"
         container.add_item(ui.TextDisplay(meta))
 
         if all_verified:
