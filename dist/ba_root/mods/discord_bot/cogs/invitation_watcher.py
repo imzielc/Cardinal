@@ -33,7 +33,13 @@ class TeamInvitationWatcher(commands.Cog):
             for candidate in registration.expired_teams():
                 expired = registration.expire_team(candidate.id)
                 if expired is None:
+                    # verified teams are protected by expire_team; nothing to do.
                     continue
+                print(
+                    f"Discord: expired team {expired.id} "
+                    f"(status={expired.status.value}, "
+                    f"expires_at={int(expired.expires_at)})"
+                )
                 try:
                     await self._cleanup(expired, season)
                 except Exception:

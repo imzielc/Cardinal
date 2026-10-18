@@ -84,7 +84,15 @@ class Registration(Storage):
 
     @staticmethod
     def is_expired(team: TeamSchema) -> bool:
-        """whether the invitation of a team has run out."""
+        """whether the invitation of a team has run out.
+
+        verified teams are exempt. verification means the roster is locked in,
+        so the invitation has done its job and the timer is no longer meaningful.
+        expiring them here would delete a fully-registered team while the
+        tournament is still running.
+        """
+        if team.status == TeamStatus.VERIFIED:
+            return False
         if team.expires_at <= 0:
             return False
         return time.time() > team.expires_at
@@ -94,10 +102,16 @@ class Registration(Storage):
         return [team for team in self.read().teams.values() if self.is_expired(team)]
 
     def expire_team(self, team_id: str) -> TeamSchema | None:
-        """removes an expired team, and any traces of its members. returns the removed team."""
+        """removes an expired team, and any traces of its members. returns the removed team.
+
+        verified teams are never expired — they've done the work, deletion here
+        would undo their registration and take their role and thread with it.
+        """
         db = self.read()
         team = db.teams.get(team_id)
         if not team:
+            return None
+        if team.status == TeamStatus.VERIFIED:
             return None
         for member in team.members:
             db.players.pop(member.discord_id, None)
