@@ -1,7 +1,7 @@
 import time
 
 from server import config
-from server.enums import TeamStatus
+from server.enums import TeamStatus, TournamentStage
 from server.notify import send_event
 from server.storage import Storage
 from tournament.link import link
@@ -11,6 +11,14 @@ from tournament.schema import RegistrationSchema, MemberSchema, TeamSchema
 
 DEFAULT_INVITE_EXPIRE_HOURS = 24.0
 DECLINE_COOLDOWN_SECONDS = 30 * 60
+
+# reminders only fire within this window before expiry. teams in the "long
+# tail" of their invitation get no pings until the deadline is close.
+REMINDER_WINDOW_SECONDS = 24 * 3600
+# how often a team is reminded once inside the window.
+REMINDER_INTERVAL_SECONDS = 6 * 3600
+# total number of reminders a team gets per invitation cycle.
+MAX_REMINDERS = 4
 
 
 def _default_expire_seconds() -> float:
@@ -121,6 +129,54 @@ class Registration(Storage):
         del db.teams[team_id]
         self.commit(db)
         return team
+
+    # ---- reminders ----
+
+    def reminder_due(self, team: TeamSchema) -> bool:
+        """whether this team should be pinged with an invitation reminder now.
+
+        two gates:
+          1. only in the last REMINDER_WINDOW_SECONDS (24h) before expiry.
+             before that, teams get no pings — the deadline isn't close yet.
+          2. at most REMINDER_INTERVAL_SECONDS (6h) since the previous ping,
+             up to MAX_REMINDERS (4) total in the window.
+
+        verified teams, solos, and teams with no expiry are skipped entirely.
+        """
+        if team.status == TeamStatus.VERIFIED:
+            return False
+        if team.expires_at <= 0:
+            return False
+        if team.reminders_sent >= MAX_REMINDERS:
+            return False
+
+        now = time.time()
+        window_start = team.expires_at - REMINDER_WINDOW_SECONDS
+        if now < window_start:
+            # not inside the reminder window yet.
+            return False
+
+        # reference: the last ping, or (for the first one in the window) the
+        # earliest invitation timestamp on the team. either way, at least
+        # REMINDER_INTERVAL_SECONDS must have elapsed since it.
+        if team.last_reminded_at > 0:
+            reference = team.last_reminded_at
+        else:
+            invites = [m.invited_at for m in team.members if m.invited_at > 0]
+            if not invites:
+                return False
+            reference = min(invites)
+        return (now - reference) >= REMINDER_INTERVAL_SECONDS
+
+    def mark_reminded(self, team_id: str) -> None:
+        """records that a reminder was sent for this team."""
+        db = self.read()
+        team = db.teams.get(team_id)
+        if not team:
+            return
+        team.reminders_sent += 1
+        team.last_reminded_at = time.time()
+        self.commit(db)
 
     # ---- cooldown ----
 
@@ -248,9 +304,12 @@ class Registration(Storage):
         ))
         db.players[discord_id] = team_id
         db.players[aid] = team_id
-        # adding a member brings the team back to the invitation stage.
+        # adding a member brings the team back to the invitation stage,
+        # and gives it a fresh reminder cycle.
         if team.status != TeamStatus.IN_INVITATION:
             team.status = TeamStatus.IN_INVITATION
+        team.reminders_sent = 0
+        team.last_reminded_at = 0.0
         self.commit(db)
         return True
 
@@ -308,6 +367,9 @@ class Registration(Storage):
 
         team.members = [m for m in team.members if m.discord_id != discord_id]
         team.status = TeamStatus.IN_INVITATION
+        # roster change: fresh reminder cycle for the remaining members.
+        team.reminders_sent = 0
+        team.last_reminded_at = 0.0
         if cooldown:
             team.declined[discord_id] = time.time()
         self.commit(db)
@@ -440,7 +502,7 @@ class Registration(Storage):
             season = tournament_storage.get_season(self.season_id)
         except Exception:
             return []
-        if season is None or season.stage != "REGISTRATION":
+        if season is None or season.stage != TournamentStage.REGISTRATION:
             return []
 
         try:

@@ -169,6 +169,10 @@ class TeamSchema(BaseSchema):
     declined: dict[str, float] = field(default_factory=dict)
     # the discord role that mentions this team (0 when not set, e.g. solo teams).
     role_id: int = 0
+    # reminders sent so far for this invitation cycle.
+    reminders_sent: int = 0
+    # unix time of the last reminder (0 when none sent yet).
+    last_reminded_at: float = 0.0
 
 
 @dataclass

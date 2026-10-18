@@ -23,6 +23,7 @@ from discord_bot.ui import (
     team_role_name,
 )
 from server import config
+from server.enums import TeamStatus
 from tournament import tournament
 from tournament.match_threads import match_threads
 from tournament.registration import Registration
@@ -168,7 +169,7 @@ async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
     match_threads.clear()
 
 
-# ---- one-shot migration ----
+# ---- one-shot migrations ----
 
 
 async def migrate_team_roles(bot: commands.Bot) -> None:
@@ -201,6 +202,50 @@ async def migrate_team_roles(bot: commands.Bot) -> None:
 
         try:
             await role.edit(name=expected)
+        except discord.HTTPException:
+            pass
+
+
+async def migrate_invitation_views(bot: commands.Bot) -> None:
+    """re-renders the invitation message of every team that is still in an
+    active invitation stage (not fully verified).
+
+    this catches messages that were sent before a change to the invitation
+    view's format, so they pick up the new design without waiting for a user
+    interaction. idempotent — safe to run on every startup.
+    """
+    season_id = tournament.active_season
+    if not int(season_id or "0"):
+        return
+
+    try:
+        registration = Registration(season_id=season_id)
+        db = registration.read()
+    except Exception:
+        return
+
+    for team in db.teams.values():
+        if not team.thread_id or not team.invitation_message_id:
+            continue
+        # fully verified teams are already locked down; nothing to update.
+        if team.status == TeamStatus.VERIFIED:
+            continue
+
+        try:
+            thread = bot.get_channel(team.thread_id) or await bot.fetch_channel(team.thread_id)
+            if thread is None:
+                continue
+            message = await thread.fetch_message(team.invitation_message_id)
+        except Exception:
+            # the thread or message is gone; nothing to edit.
+            continue
+
+        view = TeamInvitationView(team_id=team.id, season_id=season_id)
+        try:
+            await message.edit(
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         except discord.HTTPException:
             pass
 

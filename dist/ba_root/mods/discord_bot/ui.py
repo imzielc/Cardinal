@@ -775,15 +775,18 @@ class TeamInvitationView(ui.LayoutView):
         container.add_item(ui.TextDisplay("\n".join(member_lines)))
         container.add_item(ui.Separator())
 
+        # the footer: always carries the expiry countdown while the team can
+        # still expire (i.e. not fully verified). the countdown is relevant
+        # in both the pending state AND the "all accepted, waiting for
+        # verification" state, since neither is exempt from the timer.
         meta = f"**Roster** {total}/{size}" if size else f"**Roster** {total}"
         if all_verified:
             meta += " · All verified"
-        elif all_accepted:
-            meta += f" · {verified_count}/{total} verified"
-        elif team.expires_at > 0:
-            # explicit hours, matching invite_expire_hours instead of the
-            # relative "in a day" that <t:...:R> would produce.
-            meta += f" · {_expiry_label(team.expires_at)}"
+        else:
+            if all_accepted:
+                meta += f" · {verified_count}/{total} verified"
+            if team.expires_at > 0:
+                meta += f" · {_expiry_label(team.expires_at)}"
         container.add_item(ui.TextDisplay(meta))
 
         if all_verified:
