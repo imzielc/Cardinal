@@ -3,11 +3,12 @@
 from pathlib import Path
 from typing import override
 
-from server.storage import Storage, MODS_DIR
+from server.storage import Storage, DATA_DIR
 from server.enums import TournamentStage
 from tournament.schema import SeasonSchema, TournamentSchema
 
-SEASONS_DIR = MODS_DIR / "tournament" / "seasons"
+# seasons live under DATA_DIR, not MODS_DIR — the mods tree holds code only.
+SEASONS_DIR = DATA_DIR / "tournament" / "seasons"
 
 class Tournament(Storage):
     """reads/writes json files."""

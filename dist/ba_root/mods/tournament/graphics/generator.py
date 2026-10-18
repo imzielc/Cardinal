@@ -9,6 +9,7 @@ import io
 from tournament.graphics.runner import GRAPHICS_DIR
 from tournament import posts
 from tournament.webhook import Webhook
+from tournament.storage import SEASONS_DIR
 from pathlib import Path
 
 try:
@@ -2070,7 +2071,7 @@ if __name__ == "__main__":
     data = json.loads(sys.argv[1])
     season_id = data["season_id"]
     webhook = Webhook(season_id)
-    SEASON_DIR = GRAPHICS_DIR.parent / "seasons" / season_id
+    SEASON_DIR = SEASONS_DIR / season_id
 
     if data["type"] == "registration":
         generate_player_registration(data["name"], webhook, mention=data.get("mention"))

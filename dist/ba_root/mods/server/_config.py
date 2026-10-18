@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from .enums import Playlist, Utility
-from .storage import Storage
+from .storage import Storage, MODS_DIR
 
 
 class ConfigDict(dict):
@@ -29,7 +29,9 @@ class Config(Storage):
     """config storage class."""
 
     def __init__(self) -> None:
-        super().__init__("config.json")
+        # Config stays rooted at MODS_DIR, not DATA_DIR: its file lives at
+        # the project root, next to mods_config.json and config.toml.
+        super().__init__("config.json", base_dir=MODS_DIR)
         # our mods config file should stay in the root of the project folder.
         project_root_dir = self.directory.parents[2]
         self.path = project_root_dir / "mods_config.json"

@@ -24,6 +24,14 @@ class Load(babase.Plugin):
             print(f"The error is as following:\n {format_exc()}")
 
     def _load(self) -> None:
+        # migrate any legacy json data into DATA_DIR *before* any Storage
+        # subclass is instantiated. every Storage.__init__ creates its
+        # directory and reads from its path, so the move has to land first,
+        # otherwise bootstrap sees a fresh empty file where the real data
+        # should be. importing server.storage alone has no side effects.
+        from server.storage import migrate_to_data_dir
+        migrate_to_data_dir()
+
         # necessary imports
         import commands
         import patches
@@ -40,6 +48,11 @@ class Load(babase.Plugin):
         tournament.tournament.bootstrap()
         stats.stats.bootstrap()
 
+        # the tournament manager.
+        if int(tournament.tournament.active_season) > 0:
+            from tournament import manager
+            manager.manager.initialize(season_id=tournament.tournament.active_season)
+
         # load commands.
         commands.load()
 
@@ -49,13 +62,6 @@ class Load(babase.Plugin):
         # load patches.
         patches.load()
 
-        # the tournament manager is initialized a tick after boot:
-        # its init reads the brackets (which pulls pydantic in through
-        # schema.from_dict), and the cold pydantic import is heavy enough
-        # to trip the boot GC pass and the HostSession::Update() check.
-        if int(tournament.tournament.active_season) > 0:
-            bascenev1.AppTimer(1.5, self._init_manager)
-
         # discord bot
         if server.config.discord.enable:
             from discord_bot import launcher
@@ -64,10 +70,3 @@ class Load(babase.Plugin):
 
         # reload hooks.
         bascenev1.reload_hooks()
-
-    def _init_manager(self) -> None:
-        """loads the tournament manager a tick after boot."""
-        import tournament
-        from tournament import manager
-
-        manager.manager.initialize(season_id=tournament.tournament.active_season)
