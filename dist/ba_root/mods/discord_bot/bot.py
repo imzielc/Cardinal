@@ -13,7 +13,7 @@ from discord_bot.cogs.invitation_watcher import TeamInvitationWatcher
 from discord_bot.cogs.tournament import TournamentCommands
 from discord_bot.events import EventReceiver
 from discord_bot.held_posts import HeldPosts
-from discord_bot.ui import RegisterView, TeamInvitationView, _allow_thread_chat
+from discord_bot.ui import RegisterView, TeamInvitationView
 from server import config
 from server.enums import TeamStatus
 from tournament import tournament
@@ -44,9 +44,6 @@ class DiscordBot(commands.Bot):
         await self.add_cog(TournamentCommands(self))
         await self.add_cog(HeldPosts(self))
         await self.add_cog(TeamInvitationWatcher(self))
-        # after ready, patch any team thread that still doesn't allow chat
-        # (threads created before the permission fix was added).
-        asyncio.create_task(self._ensure_thread_permissions())
 
     def _restore_invitations(self) -> None:
         """re-registers the invitation buttons of the pending teams, so they work after a restart."""
@@ -57,41 +54,6 @@ class DiscordBot(commands.Bot):
         for team_id, team in Registration(season_id=season_id).read().teams.items():
             if team.status == TeamStatus.IN_INVITATION:
                 self.add_view(TeamInvitationView(team_id=team_id, season_id=season_id))
-
-    async def _ensure_thread_permissions(self) -> None:
-        """one-shot per startup: make sure every team thread allows chat.
-
-        fixes threads created before the permission fix landed in
-        `create_team_thread`. runs after the bot is ready so `get_channel`
-        hits the cache; only uncached threads fall back to `fetch_channel`.
-        on subsequent startups this is essentially free — threads that are
-        already fixed are skipped inside `_allow_thread_chat` without an
-        API call.
-        """
-        try:
-            await self.wait_until_ready()
-        except Exception:
-            return
-        season_id = tournament.active_season
-        if not int(season_id):
-            return
-        try:
-            teams = Registration(season_id=season_id).read().teams
-        except Exception:
-            return
-        for team in teams.values():
-            if not team.thread_id:
-                continue
-            try:
-                thread = self.get_channel(team.thread_id) or await self.fetch_channel(team.thread_id)
-            except Exception:
-                continue
-            if thread is None:
-                continue
-            try:
-                await _allow_thread_chat(thread)
-            except Exception:
-                pass
 
     async def on_app_cmd_error(
         self, interaction: Interaction, error: app_commands.AppCommandError

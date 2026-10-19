@@ -1,5 +1,9 @@
 """general slash commands."""
 
+import asyncio
+import io
+import subprocess
+
 import discord
 from discord import Interaction, app_commands
 from discord.ext import commands
@@ -8,6 +12,11 @@ from discord_bot.client import GameClient
 from discord_bot.helpers import require
 from roles import roles
 from server.enums import Authority, Role
+from server.storage import MODS_DIR
+
+SSH_TIMEOUT_SECONDS = 30
+SSH_OUTPUT_INLINE_MAX = 1800
+SSH_OUTPUT_PREVIEW_CHARS = 800
 
 
 class GeneralCommands(commands.Cog):
@@ -111,6 +120,97 @@ class GeneralCommands(commands.Cog):
         mention = getattr(channel, "mention", f"<#{target_id}>")
         await interaction.response.send_message(
             f"Sent to {mention}.", ephemeral=True
+        )
+
+    @app_commands.command(name="ssh")
+    @app_commands.describe(
+        command="Shell command to run in the project root (30s timeout)"
+    )
+    @require(Authority.LEADER)
+    async def ssh(self, interaction: Interaction, command: str) -> None:
+        """runs a shell command on the server, in the project root. leader only.
+
+        the working directory is the repo root (where .git, config.toml,
+        mods_config.json live). shell features like pipes, redirects, &&,
+        and subshells all work like they would over ssh. cd does not persist
+        between calls since each invocation is a fresh subprocess.
+        """
+        command = command.strip()
+        if not command:
+            await interaction.response.send_message(
+                "Empty command.", ephemeral=True
+            )
+            return
+
+        # repo root: mods/ -> ba_root/ -> dist/ -> project_root
+        repo_root = str(MODS_DIR.parents[2])
+
+        await interaction.response.defer(ephemeral=True)
+
+        def _run() -> tuple[int, str, str]:
+            try:
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=SSH_TIMEOUT_SECONDS,
+                )
+                return result.returncode, result.stdout or "", result.stderr or ""
+            except subprocess.TimeoutExpired:
+                return (
+                    -1,
+                    "",
+                    f"Command timed out after {SSH_TIMEOUT_SECONDS} seconds.",
+                )
+            except Exception as e:
+                return -2, "", f"Error: {e}"
+
+        returncode, stdout, stderr = await asyncio.to_thread(_run)
+
+        combined = ""
+        if stdout:
+            combined += stdout
+        if stderr:
+            if combined and not combined.endswith("\n"):
+                combined += "\n"
+            combined += stderr
+        if not combined:
+            combined = "(no output)"
+
+        # run the command and its output inside the same code block, so a
+        # user reading the reply sees exactly what produced what.
+        body = f"$ {command}\n\n{combined}"
+        # a stray ``` inside command output would close our code block early.
+        body = body.replace("```", "'''")
+
+        emoji = "✅" if returncode == 0 else "❌"
+        header = f"{emoji} exit `{returncode}`"
+
+        print(
+            f"[leader] ssh: {interaction.user.name}: {command} (exit {returncode})"
+        )
+
+        # short output: inline in a code block.
+        if len(body) <= SSH_OUTPUT_INLINE_MAX:
+            await interaction.followup.send(
+                f"{header}\n```\n{body}\n```",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        # long output: preview inline, full output as a file.
+        preview = body[:SSH_OUTPUT_PREVIEW_CHARS] + "\n... (see attached output.txt)"
+        buffer = io.BytesIO(body.encode("utf-8"))
+        buffer.seek(0)
+        file = discord.File(buffer, filename="output.txt")
+        await interaction.followup.send(
+            f"{header}\n```\n{preview}\n```",
+            file=file,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     @app_commands.command(name="admin")
