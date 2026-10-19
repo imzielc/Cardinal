@@ -130,18 +130,38 @@ class Registration(Storage):
         self.commit(db)
         return team
 
+    def extend_all_expiries(self, hours: float) -> int:
+        """extends every team's expiry by `hours`, returns how many were updated.
+
+        teams without an expiry (solos) are skipped. verified teams are
+        extended too, so if they later become unverified (e.g. via
+        `/account set`), the extended time is already on disk.
+        """
+        seconds = hours * 3600
+        db = self.read()
+        count = 0
+        for team in db.teams.values():
+            if team.expires_at <= 0:
+                continue
+            team.expires_at += seconds
+            count += 1
+        if count:
+            self.commit(db)
+        return count
+
     # ---- reminders ----
 
     def reminder_due(self, team: TeamSchema) -> bool:
         """whether this team should be pinged with an invitation reminder now.
 
-        two gates:
-          1. only in the last REMINDER_WINDOW_SECONDS (24h) before expiry.
-             before that, teams get no pings — the deadline isn't close yet.
-          2. at most REMINDER_INTERVAL_SECONDS (6h) since the previous ping,
+        three gates:
+          1. the team must actually need action. if every member has accepted
+             AND every member is verified, there is nothing to remind — skip.
+             this is the data-level truth, independent of `team.status`. catches
+             any edge case where the status label is out of sync with member data.
+          2. only in the last REMINDER_WINDOW_SECONDS (24h) before expiry.
+          3. at most REMINDER_INTERVAL_SECONDS (6h) since the previous ping,
              up to MAX_REMINDERS (4) total in the window.
-
-        verified teams, solos, and teams with no expiry are skipped entirely.
         """
         if team.status == TeamStatus.VERIFIED:
             return False
@@ -150,15 +170,19 @@ class Registration(Storage):
         if team.reminders_sent >= MAX_REMINDERS:
             return False
 
+        # explicit data check: if nobody still needs to act, do not remind,
+        # regardless of what `status` says.
+        has_unaccepted = any(not m.accepted for m in team.members)
+        has_unverified = any(not m.device_uuid for m in team.members)
+        if not has_unaccepted and not has_unverified:
+            return False
+
         now = time.time()
         window_start = team.expires_at - REMINDER_WINDOW_SECONDS
         if now < window_start:
             # not inside the reminder window yet.
             return False
 
-        # reference: the last ping, or (for the first one in the window) the
-        # earliest invitation timestamp on the team. either way, at least
-        # REMINDER_INTERVAL_SECONDS must have elapsed since it.
         if team.last_reminded_at > 0:
             reference = team.last_reminded_at
         else:
@@ -278,6 +302,45 @@ class Registration(Storage):
         if not team:
             return False
         team.role_id = int(role_id)
+        self.commit(db)
+        return True
+
+    def change_account_id(self, team_id: str, discord_id: str, new_account_id: str) -> bool:
+        """updates a member's game account id and clears their verification state.
+
+        leader-only, invoked from `/account set`. the players map is updated
+        so `is_registered()` and verify/ready flows keep working. the member's
+        `device_uuid` is cleared, which means they must `/verify` again in-game.
+
+        returns True if the team was updated, False if the member wasn't found
+        or nothing changed.
+        """
+        db = self.read()
+        team = db.teams.get(team_id)
+        if not team:
+            return False
+
+        member = next((m for m in team.members if m.discord_id == str(discord_id)), None)
+        if member is None:
+            return False
+
+        old_account_id = member.account_id
+        if old_account_id == new_account_id:
+            return False
+
+        # drop the old account_id -> team mapping, add the new one.
+        if old_account_id and db.players.get(old_account_id) == team_id:
+            del db.players[old_account_id]
+        db.players[new_account_id] = team_id
+
+        member.account_id = new_account_id
+        member.device_uuid = ""  # force re-verify
+
+        # a verified team that just lost a verified member is now unverified.
+        if team.status == TeamStatus.VERIFIED:
+            if not all(m.device_uuid for m in team.members):
+                team.status = TeamStatus.UNVERIFIED
+
         self.commit(db)
         return True
 

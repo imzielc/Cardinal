@@ -5,7 +5,7 @@ from traceback import format_exc
 import discord
 from discord.ext import commands, tasks
 
-from discord_bot.events import promote_waitlist_one
+from discord_bot.events import cleanup_expired_teams
 from discord_bot.ui import _expiry_label
 from tournament import tournament
 from tournament.registration import Registration
@@ -29,38 +29,36 @@ class TeamInvitationWatcher(commands.Cog):
         if not int(season_id):
             return
         try:
-            registration = Registration(season_id=season_id)
-            season = tournament.get_season(season_id)
-
-            # 1. expire anything past its deadline.
-            for candidate in registration.expired_teams():
-                expired = registration.expire_team(candidate.id)
-                if expired is None:
-                    # verified teams are protected by expire_team; nothing to do.
-                    continue
+            # 1. expire anything past its deadline and clean up Discord.
+            expired = await cleanup_expired_teams(self.bot, season_id)
+            for team in expired:
                 print(
-                    f"Discord: expired team {expired.id} "
-                    f"(status={expired.status.value}, "
-                    f"expires_at={int(expired.expires_at)})"
+                    f"Discord: expired team {team.id} "
+                    f"(status={team.status.value}, "
+                    f"expires_at={int(team.expires_at)})"
                 )
-                try:
-                    await self._cleanup(expired, season)
-                except Exception:
-                    print(f"Discord: could not clean up expired invitation {expired.id}:\n{format_exc()}")
-                # a slot just opened: promote the top of the waitlist if any.
-                await promote_waitlist_one(self.bot, season_id)
 
             # 2. remind any team that is still pending verification.
-            #    (registration.read() re-reads from disk after expire_team above.)
-            for team in registration.read().teams.values():
+            #    we re-read each team by id inside the loop (via get_team),
+            #    so a verify that happens while an earlier reminder is being
+            #    awaited is picked up on the very next iteration. this closes
+            #    the race where a snapshot taken at loop start would still
+            #    show a just-verified team as pending.
+            registration = Registration(season_id=season_id)
+            team_ids = list(registration.read().teams.keys())
+            for team_id in team_ids:
+                team = registration.get_team(team_id)
+                if team is None:
+                    # deleted during the loop (expired, dissolved, etc.)
+                    continue
                 if not registration.reminder_due(team):
                     continue
-                if await self._send_reminder(team, season):
+                if await self._send_reminder(team):
                     registration.mark_reminded(team.id)
         except Exception:
             print(f"Discord: invitation watcher failed:\n{format_exc()}")
 
-    async def _send_reminder(self, team, season) -> bool:
+    async def _send_reminder(self, team) -> bool:
         """sends a reminder into the team's thread.
 
         returns True if the reminder was sent OR could not be sent for a
@@ -69,7 +67,6 @@ class TeamInvitationWatcher(commands.Cog):
         error, so the next cycle retries.
         """
         if not team.thread_id:
-            # no thread to send into; nothing to do.
             return True
 
         try:
@@ -99,18 +96,13 @@ class TeamInvitationWatcher(commands.Cog):
         return True
 
     def _reminder_message(self, team) -> tuple[str | None, list[str]]:
-        """builds the reminder text and the list of discord ids to ping.
-
-        returns (None, []) when there is nobody to remind (team is done).
-        """
+        """builds the reminder text and the list of discord ids to ping."""
         unaccepted = [m for m in team.members if not m.accepted]
         unverified = [m for m in team.members if not m.device_uuid]
 
         if not unaccepted and not unverified:
             return None, []
 
-        # ping anyone who still needs to act, plus the captain, so the
-        # person running the team always knows it is at risk.
         targets: list[str] = []
         seen: set[str] = set()
         for member in list(unaccepted) + list(unverified):
@@ -136,51 +128,6 @@ class TeamInvitationWatcher(commands.Cog):
                 f"Join the game server and run `/verify` in-game.{expiry}"
             )
         return body, targets
-
-    async def _cleanup(self, team, season) -> None:
-        channel = None
-        if team.thread_id:
-            try:
-                channel = self.bot.get_channel(team.thread_id)
-                if channel is None:
-                    channel = await self.bot.fetch_channel(team.thread_id)
-            except discord.HTTPException:
-                channel = None
-
-        # reach the guild through the thread, or fall back to the first guild we know.
-        guild = getattr(channel, "guild", None) if channel else None
-        if guild is None and self.bot.guilds:
-            guild = self.bot.guilds[0]
-
-        if season is not None and season.participant_role_id and guild is not None:
-            role = guild.get_role(season.participant_role_id)
-            if role is not None:
-                for member in team.members:
-                    try:
-                        user = guild.get_member(int(member.discord_id))
-                    except (TypeError, ValueError):
-                        continue
-                    if user and role in user.roles:
-                        try:
-                            await user.remove_roles(role)
-                        except discord.HTTPException:
-                            pass
-
-        # delete the team role if it exists.
-        if team.role_id and guild is not None:
-            team_role = guild.get_role(team.role_id)
-            if team_role:
-                try:
-                    await team_role.delete()
-                except discord.HTTPException:
-                    pass
-
-        # the attempt is dead, throw its thread away.
-        if channel is not None:
-            try:
-                await channel.delete()
-            except discord.HTTPException:
-                pass
 
     @watch.before_loop
     async def before_watch(self) -> None:

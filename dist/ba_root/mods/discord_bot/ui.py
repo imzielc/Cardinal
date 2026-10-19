@@ -190,6 +190,33 @@ async def find_archived_thread(channel, name: str):
     return None
 
 
+async def _allow_thread_chat(thread) -> None:
+    """allow thread members to send messages in the thread.
+
+    discord threads inherit permissions from their parent channel. if the
+    registration channel restricts @everyone from sending messages, then
+    private thread members are blocked too. overriding at the thread level
+    fixes this. safe because the thread is private: only added members and
+    moderators can even see it, so relaxing @everyone here has no wider effect.
+
+    skips the API call if the override is already in place, so calling this
+    on an already-fixed thread is free (no audit log entry, no HTTP request).
+    """
+    if thread.guild is None:
+        return
+    default_role = thread.guild.default_role
+    overwrite = thread.overwrites.get(default_role)
+    if overwrite is not None and overwrite.send_messages is True:
+        return
+    try:
+        await thread.set_permissions(
+            default_role,
+            send_messages=True,
+        )
+    except discord.HTTPException:
+        pass
+
+
 async def create_team_thread(channel, team_name: str, season_id: str,
                              captain_user, invited_members: list):
     """returns the private thread for the team, reusing an archived one if it exists."""
@@ -215,6 +242,8 @@ async def create_team_thread(channel, team_name: str, season_id: str,
                     await existing.add_user(member)
                 except discord.HTTPException:
                     pass
+            # ensure members can chat (parent-channel restriction may apply).
+            await _allow_thread_chat(existing)
             return existing
         except discord.HTTPException:
             pass
@@ -243,6 +272,9 @@ async def create_team_thread(channel, team_name: str, season_id: str,
             await thread.add_user(member)
         except discord.HTTPException:
             pass
+
+    # ensure members can chat (parent-channel restriction may apply).
+    await _allow_thread_chat(thread)
     return thread
 
 

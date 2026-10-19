@@ -53,6 +53,66 @@ class GeneralCommands(commands.Cog):
             result += heads.format(player["name"], player["client_id"])
         await interaction.followup.send(result)
 
+    @app_commands.command(name="announce")
+    @app_commands.describe(
+        target="The channel or thread to send to (mention or id)",
+        message="The text to send",
+        role="Optional role to ping (single role only)",
+    )
+    @require(Authority.LEADER)
+    async def announce(
+        self,
+        interaction: Interaction,
+        target: str,
+        message: str,
+        role: discord.Role = None,
+    ) -> None:
+        """sends a bot message to a channel or thread. leader only."""
+        target_clean = target.strip().strip("<#>")
+        try:
+            target_id = int(target_clean)
+        except ValueError:
+            await interaction.response.send_message(
+                "Invalid target. Use a channel/thread mention or id.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            channel = self.bot.get_channel(target_id) or await self.bot.fetch_channel(target_id)
+        except Exception:
+            channel = None
+        if channel is None or not isinstance(channel, discord.abc.Messageable):
+            await interaction.response.send_message(
+                "Couldn't find that channel or thread.",
+                ephemeral=True,
+            )
+            return
+
+        if role is not None:
+            content = f"{role.mention} {message}"
+            allowed = discord.AllowedMentions(roles=[role], users=False, everyone=False)
+        else:
+            content = message
+            allowed = discord.AllowedMentions.none()
+
+        try:
+            await channel.send(content, allowed_mentions=allowed)
+        except discord.HTTPException as e:
+            await interaction.response.send_message(
+                f"Couldn't send: {e}", ephemeral=True
+            )
+            return
+
+        print(
+            f"[leader] announce: {interaction.user.name} -> "
+            f"#{getattr(channel, 'name', target_id)}"
+        )
+        mention = getattr(channel, "mention", f"<#{target_id}>")
+        await interaction.response.send_message(
+            f"Sent to {mention}.", ephemeral=True
+        )
+
     @app_commands.command(name="admin")
     @app_commands.describe(user="the user to add/remove")
     @require(Authority.LEADER)

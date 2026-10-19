@@ -20,10 +20,8 @@ from discord_bot.ui import (
     create_team_role,
     create_team_thread,
     refresh_register_panel,
-    team_role_name,
 )
 from server import config
-from server.enums import TeamStatus
 from tournament import tournament
 from tournament.match_threads import match_threads
 from tournament.registration import Registration
@@ -137,6 +135,79 @@ async def _delete_role(bot: commands.Bot, role_id: int) -> None:
         pass
 
 
+async def cleanup_expired_team(bot: commands.Bot, team, season) -> None:
+    """removes a removed team's Discord traces: participant role, team role, thread.
+
+    called after `Registration.expire_team()` has already removed the team
+    from the store. no-ops on any missing piece.
+    """
+    channel = None
+    if team.thread_id:
+        try:
+            channel = bot.get_channel(team.thread_id) or await bot.fetch_channel(team.thread_id)
+        except discord.HTTPException:
+            channel = None
+
+    guild = getattr(channel, "guild", None) if channel else None
+    if guild is None and bot.guilds:
+        guild = bot.guilds[0]
+
+    if season is not None and season.participant_role_id and guild is not None:
+        role = guild.get_role(season.participant_role_id)
+        if role is not None:
+            for member in team.members:
+                try:
+                    user = guild.get_member(int(member.discord_id))
+                except (TypeError, ValueError):
+                    continue
+                if user and role in user.roles:
+                    try:
+                        await user.remove_roles(role)
+                    except discord.HTTPException:
+                        pass
+
+    if team.role_id and guild is not None:
+        team_role = guild.get_role(team.role_id)
+        if team_role:
+            try:
+                await team_role.delete()
+            except discord.HTTPException:
+                pass
+
+    if channel is not None:
+        try:
+            await channel.delete()
+        except discord.HTTPException:
+            pass
+
+
+async def cleanup_expired_teams(bot: commands.Bot, season_id: str) -> list:
+    """expires every team past its deadline, cleans up Discord, promotes waitlist.
+
+    returns the list of expired team objects (already removed from the store).
+    safe to call any time; the watcher uses it on its 5-min loop, and the
+    `/tournament extend` command calls it inline to sweep any team that stayed
+    expired after extension.
+    """
+    registration = Registration(season_id=season_id)
+    season = tournament.get_season(season_id)
+    removed = []
+    for candidate in registration.expired_teams():
+        team = registration.expire_team(candidate.id)
+        if team is None:
+            continue
+        try:
+            await cleanup_expired_team(bot, team, season)
+        except Exception:
+            pass
+        removed.append(team)
+        try:
+            await promote_waitlist_one(bot, season_id)
+        except Exception:
+            pass
+    return removed
+
+
 async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
     """deletes every discord trace of a season: participant role, group roles, team roles,
     invitation threads, and match threads."""
@@ -169,87 +240,6 @@ async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
     match_threads.clear()
 
 
-# ---- one-shot migrations ----
-
-
-async def migrate_team_roles(bot: commands.Bot) -> None:
-    """renames every existing team role to the current "[Team] <name>" format.
-
-    idempotent — roles that already carry the prefix are skipped. safe to run on
-    every startup.
-    """
-    season_id = tournament.active_season
-    if not int(season_id or "0"):
-        return
-
-    try:
-        registration = Registration(season_id=season_id)
-        db = registration.read()
-    except Exception:
-        return
-
-    for team in db.teams.values():
-        if not team.role_id:
-            continue
-
-        role = _find_role(bot, team.role_id)
-        if role is None:
-            continue
-
-        expected = team_role_name(team.id)
-        if role.name == expected:
-            continue
-
-        try:
-            await role.edit(name=expected)
-        except discord.HTTPException:
-            pass
-
-
-async def migrate_invitation_views(bot: commands.Bot) -> None:
-    """re-renders the invitation message of every team that is still in an
-    active invitation stage (not fully verified).
-
-    this catches messages that were sent before a change to the invitation
-    view's format, so they pick up the new design without waiting for a user
-    interaction. idempotent — safe to run on every startup.
-    """
-    season_id = tournament.active_season
-    if not int(season_id or "0"):
-        return
-
-    try:
-        registration = Registration(season_id=season_id)
-        db = registration.read()
-    except Exception:
-        return
-
-    for team in db.teams.values():
-        if not team.thread_id or not team.invitation_message_id:
-            continue
-        # fully verified teams are already locked down; nothing to update.
-        if team.status == TeamStatus.VERIFIED:
-            continue
-
-        try:
-            thread = bot.get_channel(team.thread_id) or await bot.fetch_channel(team.thread_id)
-            if thread is None:
-                continue
-            message = await thread.fetch_message(team.invitation_message_id)
-        except Exception:
-            # the thread or message is gone; nothing to edit.
-            continue
-
-        view = TeamInvitationView(team_id=team.id, season_id=season_id)
-        try:
-            await message.edit(
-                view=view,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except discord.HTTPException:
-            pass
-
-
 # ---- waitlist promotion ----
 
 
@@ -274,7 +264,6 @@ async def announce_waitlist_promotion(bot: commands.Bot, season_id: str, info: d
     if not season:
         return
 
-    # locate the captain in any of the bot's guilds.
     guild = None
     captain = None
     for g in bot.guilds:
@@ -286,7 +275,6 @@ async def announce_waitlist_promotion(bot: commands.Bot, season_id: str, info: d
     if guild is None or captain is None:
         return
 
-    # participant role.
     if season.participant_role_id:
         participant = guild.get_role(season.participant_role_id)
         if participant:
@@ -295,7 +283,6 @@ async def announce_waitlist_promotion(bot: commands.Bot, season_id: str, info: d
             except discord.HTTPException:
                 pass
 
-    # team role.
     member_ids = []
     for m in team.members:
         try:
@@ -306,7 +293,6 @@ async def announce_waitlist_promotion(bot: commands.Bot, season_id: str, info: d
     if team_role_id:
         registration.set_role(team_id, team_role_id)
 
-    # the thread lives in the register panel's channel, same as manual registrations.
     channel_id, _ = tournament.get_panel()
     if not channel_id:
         return

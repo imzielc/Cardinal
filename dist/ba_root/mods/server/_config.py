@@ -68,6 +68,20 @@ class Config(Storage):
                 changed |= Config._merge_missing(config[key], value)
         return changed
 
+    def set_nested(self, keys: list, value) -> None:
+        """writes a nested setting. creates intermediate dicts as needed.
+
+        example: set_nested(["discord", "invite_expire_hours"], 48)
+        """
+        db = self.read()
+        node = db
+        for k in keys[:-1]:
+            if k not in node:
+                node[k] = {}
+            node = node[k]
+        node[keys[-1]] = value
+        self.commit(db)
+
     def toggle(self, utility: Utility) -> bool:
         """toggles the utility."""
         config = self.read()

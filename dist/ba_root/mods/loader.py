@@ -24,14 +24,6 @@ class Load(babase.Plugin):
             print(f"The error is as following:\n {format_exc()}")
 
     def _load(self) -> None:
-        # migrate any legacy json data into DATA_DIR *before* any Storage
-        # subclass is instantiated. every Storage.__init__ creates its
-        # directory and reads from its path, so the move has to land first,
-        # otherwise bootstrap sees a fresh empty file where the real data
-        # should be. importing server.storage alone has no side effects.
-        from server.storage import migrate_to_data_dir
-        migrate_to_data_dir()
-
         # necessary imports
         import commands
         import patches

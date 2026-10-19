@@ -102,6 +102,21 @@ class Link(Storage):
         self.commit(db)
         return True
 
+    def relink(self, discord_id: str, new_account_id: str) -> bool:
+        """replaces the game account bound to this discord user. returns whether it changed.
+
+        leader-only operation, invoked from `/account set`. the target must
+        already be linked; callers are expected to check this before calling.
+        """
+        db = self.read()
+        did = str(discord_id)
+        new_aid = str(new_account_id)
+        if db.links.get(did) == new_aid:
+            return False
+        db.links[did] = new_aid
+        self.commit(db)
+        return True
+
     # ---- internals ----
 
     @staticmethod

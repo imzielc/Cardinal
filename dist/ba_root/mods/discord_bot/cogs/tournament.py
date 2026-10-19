@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import discord
 from discord import Interaction, app_commands
 from discord.ext import commands
 
 from discord_bot.client import GameClient
-from discord_bot.events import cleanup_season, promote_waitlist_one
+from discord_bot.events import cleanup_season, cleanup_expired_teams, promote_waitlist_one
 from discord_bot.helpers import require
 from discord_bot.ui import (
     CaptainRegistrationModal,
     ConfirmView,
     RegisterView,
     SoloRegistrationModal,
+    _expiry_label,
     allowed_mentions_for,
     invitation_view,
     participant_role,
     refresh_register_panel,
 )
+from server import config
 from server.enums import (
     Authority,
     SeriesType,
@@ -381,7 +384,6 @@ class TournamentCommands(
                     f"Team **{team.id}** dissolved.", ephemeral=True
                 )
 
-                # a slot just opened: promote the top of the waitlist if any.
                 await promote_waitlist_one(self.bot, season_id)
             else:
                 updated = Registration(season_id=season_id).leave(
@@ -423,6 +425,59 @@ class TournamentCommands(
             abort_text="You're still on the team.",
         )
         await interaction.response.send_message(prompt, view=view, ephemeral=True)
+
+    @app_commands.command(name="extend")
+    @app_commands.describe(hours="How many hours to add to the invitation expiry (1-168)")
+    @require(Authority.LEADER)
+    async def extend_expiry(self, interaction: Interaction, hours: int) -> None:
+        """extends the invitation expiry for the season and every team. leader only."""
+        season_id = tournament.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament season opened currently.", ephemeral=True
+            )
+            return
+
+        if hours <= 0 or hours > 168:
+            await interaction.response.send_message(
+                "Hours must be between 1 and 168.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        current = config.discord.get("invite_expire_hours", 24)
+        try:
+            current = float(current)
+        except (TypeError, ValueError):
+            current = 24.0
+        new_hours = current + hours
+        config.set_nested(["discord", "invite_expire_hours"], new_hours)
+
+        registration = Registration(season_id=season_id)
+        extended = registration.extend_all_expiries(hours)
+
+        expired = await cleanup_expired_teams(self.bot, season_id)
+        for team in expired:
+            print(
+                f"Discord: expired team {team.id} after extension "
+                f"(status={team.status.value}, expires_at={int(team.expires_at)})"
+            )
+
+        print(
+            f"[leader] extend: +{hours}h by {interaction.user.name} "
+            f"(config now {new_hours}h, extended {extended} team(s), "
+            f"expired {len(expired)} team(s))"
+        )
+
+        msg = (
+            f"Extended invitation expiry by **{hours}h**. "
+            f"Config is now **{int(new_hours) if new_hours.is_integer() else new_hours}h**. "
+            f"Updated **{extended}** team(s)."
+        )
+        if expired:
+            msg += f" Expired **{len(expired)}** team(s) that were still past deadline."
+        await interaction.followup.send(msg, ephemeral=True)
 
     @app_commands.command(name="registrations")
     @app_commands.describe(option="Open or close the registrations")
@@ -520,6 +575,72 @@ class TournamentCommands(
             lines.append(line)
         message_text = "\n".join(lines)
         await interaction.response.send_message(message_text, ephemeral=True)
+
+    @app_commands.command(name="teams")
+    async def list_teams(self, interaction: Interaction) -> None:
+        """lists the registered teams of the active season."""
+        season_id = tournament.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament season opened currently.", ephemeral=True
+            )
+            return
+
+        registration = Registration(season_id=season_id).read()
+        if not registration.teams:
+            await interaction.response.send_message(
+                "No teams registered yet.", ephemeral=True
+            )
+            return
+
+        total = len(registration.teams)
+        verified = sum(
+            1 for t in registration.teams.values() if t.status == TeamStatus.VERIFIED
+        )
+
+        lines = [f"**Registered teams** — {total} total ({verified} verified)\n"]
+
+        for team in registration.teams.values():
+            joined = sum(1 for m in team.members if m.accepted)
+            total_members = len(team.members)
+
+            if team.status == TeamStatus.VERIFIED:
+                status = "verified"
+            elif team.status == TeamStatus.UNVERIFIED:
+                status = f"unverified · {joined}/{total_members} joined"
+            else:
+                status = f"invitation · {joined}/{total_members} joined"
+
+            parts = [f"**{team.id}**", f"`{status}`"]
+
+            if team.expires_at > 0 and team.status != TeamStatus.VERIFIED:
+                parts.append(_expiry_label(team.expires_at))
+
+            if team.role_id:
+                parts.append(f"<@&{team.role_id}>")
+
+            lines.append(" — ".join(parts))
+
+        # split into messages of ~1900 chars.
+        chunks = []
+        current = ""
+        for line in lines:
+            if len(current) + len(line) + 1 > 1900:
+                chunks.append(current)
+                current = line
+            else:
+                current += ("\n" if current else "") + line
+        if current:
+            chunks.append(current)
+
+        allowed = discord.AllowedMentions.none()
+        if len(chunks) == 1:
+            await interaction.response.send_message(chunks[0], allowed_mentions=allowed)
+            return
+
+        await interaction.response.send_message(chunks[0], allowed_mentions=allowed)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk, allowed_mentions=allowed)
 
     @app_commands.command(name="waitlist")
     @require(Authority.LEADER)
