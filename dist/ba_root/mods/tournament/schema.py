@@ -78,6 +78,8 @@ class MatchSchema(BaseSchema):
     # "winners", "losers" or "grand-final" in double elimination.
     bracket: str | None = None
     is_bye: bool = False
+    # optional display name. overrides the derived label when set.
+    label: str = ""
 
 
 @dataclass

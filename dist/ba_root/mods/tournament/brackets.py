@@ -14,7 +14,9 @@ from tournament.schema import BracketsMetaSchema, MatchSchema, MatchTeamSchema, 
 
 
 def round_label(match: MatchSchema) -> str:
-    """human label for a knockout match, based on its bracket and round id."""
+    """human label for a knockout match. uses the match's own label when set."""
+    if match.label:
+        return match.label
     if match.bracket == "winners":
         return f"Winners Round {match.round_id}"
     if match.bracket == "losers":
@@ -24,7 +26,6 @@ def round_label(match: MatchSchema) -> str:
     if match.bracket == "main-stage":
         return match.round_id.replace("-", " ").title()
     return ""
-
 
 class Brackets(Storage):
     """generates brackets and handles the rounds."""
@@ -123,14 +124,20 @@ class Brackets(Storage):
         self.commit_meta(brackets)
 
     def release_pending_rounds(self) -> bool:
-        """fires the round_started event for a queued transition. returns whether anything fired."""
+        """fires the round_started event for a queued transition. returns whether anything fired.
+
+        the pending state is cleared only after the event is actually sent.
+        if the bot isn't listening, the pending round stays on disk so the
+        next release attempt retries, no round is silently lost.
+        """
         brackets = self.read_meta()
         pending = brackets.pending_round_start
         if not pending:
             return False
+        if not send_event("round_started", season_id=self.season_id, matches=pending):
+            return False
         brackets.pending_round_start = []
         self.commit_meta(brackets)
-        send_event("round_started", season_id=self.season_id, matches=pending)
         return True
 
     def _try_queue_transition(self, old_rounds: list[str], completed: bool = False) -> None:

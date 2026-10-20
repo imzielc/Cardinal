@@ -1,19 +1,12 @@
 """helpers for brackets.py: the rounds of the knockout stage, for both elimination modes.
 
-a stage is {bracket: {round id: RoundSchema}}, each round is a file in a folder of its bracket:
+a stage is {bracket: {round id: RoundSchema}}, each round is a file in a folder of its bracket.
+the rounds are built whole at the start. a slot that waits for another match knows where its
+team comes from (its "source": winner "W" or loser "L" of that match), so when a match ends
+its teams are moved on to the slots waiting for them (`settle`).
 
-    single elimination   main-stage/     round-of-16.json, quarter-finals.json, semi-finals.json, finals.json
-    double elimination   winners/        1.json, 2.json ...
-                         losers/         1.json, 2.json ...
-                         grand-final/    1.json
-
-the rounds are built whole at the start. a slot that waits for another match knows where its team
-comes from (its "source": the winner "W" or loser "L" of that match), so when a match ends, its
-teams are moved on to the slots waiting for them (`settle`). that is all the two modes need in common,
-only building the rounds (`build_single`, `build_double`) and the end of the bracket (`outcome`) differ.
-
-the bracket is sized to a power of two, the empty places of a double elimination bracket are byes: a
-match with a bye decides itself and the other team goes on.
+the bracket is sized to a power of two, the empty places of a double elimination bracket are
+byes: a match with a bye decides itself and the other team goes on.
 """
 
 from __future__ import annotations
@@ -30,7 +23,6 @@ WINNERS = "winners"
 LOSERS = "losers"
 GRAND_FINAL = "grand-final"
 
-# the order the brackets are listed in
 BRACKET_RANK = {MAIN_STAGE: 0, WINNERS: 0, LOSERS: 1, GRAND_FINAL: 2}
 MINIMUM_TEAMS = 4
 
@@ -81,12 +73,20 @@ def _slot(idx: int, origin: str | None = None, name: str | None = None, bye: boo
     return MatchTeamSchema(idx=idx, name=name, source=origin, bye=bye)
 
 
-def _match(bracket: str, round_id: str | int, match_id: str | int, first: MatchTeamSchema, second: MatchTeamSchema) -> MatchSchema:
+def _match(
+    bracket: str,
+    round_id: str | int,
+    match_id: str | int,
+    first: MatchTeamSchema,
+    second: MatchTeamSchema,
+    label: str = "",
+) -> MatchSchema:
     return MatchSchema(
         match_id=str(match_id),
         teams=[first, second],
         bracket=bracket,
         round_id=str(round_id),
+        label=label,
     )
 
 
@@ -123,6 +123,7 @@ def build_single(pairings: list[tuple[str, str]]) -> Stage:
                 2,
                 _slot(0, source("L", MAIN_STAGE, previous, 1)),
                 _slot(1, source("L", MAIN_STAGE, previous, 2)),
+                label="3rd Place Match",
             )
         rounds[name] = RoundSchema(matches=matches, number=number)
         previous, number, count = name, number + 1, count // 2
@@ -136,7 +137,7 @@ def build_double(teams: list[str], rng: random.Random | None = None) -> Stage:
         raise ValueError(f"Double elimination needs at least {MINIMUM_TEAMS} teams.")
     rng = rng or random.Random()
 
-    size = 1 << (len(teams) - 1).bit_length()  # the next power of two
+    size = 1 << (len(teams) - 1).bit_length()
     rounds = size.bit_length() - 1
 
     seeded = list(teams)
@@ -174,7 +175,6 @@ def build_double(teams: list[str], rng: random.Random | None = None) -> Stage:
     for round_id in range(1, 2 * (rounds - 1) + 1):
         matches = {}
         if round_id == 1:
-            # the losers of the first winners round play each other.
             for match_id in range(1, size // 4 + 1):
                 matches[str(match_id)] = _match(
                     LOSERS,
@@ -184,11 +184,9 @@ def build_double(teams: list[str], rng: random.Random | None = None) -> Stage:
                     _slot(1, source("L", WINNERS, 1, 2 * match_id)),
                 )
         elif round_id % 2 == 0:
-            # the survivors meet the teams that just dropped from the winners bracket.
-            dropping = round_id // 2 + 1  # the winners round the drop comes from
+            dropping = round_id // 2 + 1
             count = size >> dropping
             for match_id in range(1, count + 1):
-                # alternate the order of the drops, so a team does not meet who it just played.
                 dropped = count - match_id + 1 if (round_id // 2) % 2 == 1 else match_id
                 matches[str(match_id)] = _match(
                     LOSERS,
@@ -198,7 +196,6 @@ def build_double(teams: list[str], rng: random.Random | None = None) -> Stage:
                     _slot(1, source("L", WINNERS, dropping, dropped)),
                 )
         else:
-            # the survivors play each other.
             for match_id in range(1, len(losers[str(round_id - 1)].matches) // 2 + 1):
                 matches[str(match_id)] = _match(
                     LOSERS,
@@ -209,7 +206,7 @@ def build_double(teams: list[str], rng: random.Random | None = None) -> Stage:
                 )
         losers[str(round_id)] = RoundSchema(matches=matches, number=round_id)
 
-    # ---- grand final: the winners champion vs the losers champion ----
+    # ---- grand final ----
     grand_final = RoundSchema(
         matches={
             "1": _match(
@@ -285,7 +282,6 @@ def settle(stage: Stage, mode: TournamentMode) -> None:
                 changed = True
 
             if all(is_known(slot) for slot in match.teams) and any(slot.bye for slot in match.teams):
-                # a bye decides the match, the other team goes on (two byes make a bye).
                 bye_slots = [slot for slot in match.teams if slot.bye]
                 match.winner_idx = 1 - bye_slots[0].idx if len(bye_slots) == 1 else 0
                 match.loser_idx = 1 - match.winner_idx
@@ -302,13 +298,13 @@ def _settle_grand_final(stage: Stage) -> None:
     matches = stage[GRAND_FINAL]["1"].matches
     first = matches["1"]
     if first.status == Status.COMPLETED and first.winner_idx == 1 and "2" not in matches:
-        # the losers champion won, both teams have lost once now. they play again.
         matches["2"] = _match(
             GRAND_FINAL,
             1,
             2,
             _slot(0, name=first.teams[0].name),
             _slot(1, name=first.teams[1].name),
+            label="Grand Final (Reset)",
         )
 
 
@@ -350,7 +346,6 @@ def depth(stage: Stage) -> dict[str, int]:
                 of(index[parse_source(slot.source)[1:]]) for slot in match.teams if slot.source
             ]
             if not feeders and match.bracket == GRAND_FINAL and match.match_id != "1":
-                # the reset match follows the first grand final.
                 feeders = [of(index[(GRAND_FINAL, match.round_id, "1")])]
             result[key] = 1 + max(feeders, default=0)
         return result[key]
@@ -395,7 +390,6 @@ def outcome(stage: Stage, mode: TournamentMode) -> tuple[bool, list[dict]]:
             return False, []
         return True, _double_placements(stage, decider)
 
-    # single elimination: over when the finals round (the final and the third place match) is.
     finals = sorted_rounds(stage[MAIN_STAGE])[-1][1]
     if finals.status != Status.COMPLETED:
         return False, []
@@ -416,7 +410,6 @@ def _double_placements(stage: Stage, decider: MatchSchema) -> list[dict]:
         {"rank": 2, "team": decider.teams[decider.loser_idx].name},
     ]
 
-    # the losers bracket: the later the round a team lost in, the better its rank.
     by_round: dict[int, list[str]] = {}
     for round_data in stage[LOSERS].values():
         for match in round_data.matches.values():

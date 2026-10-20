@@ -20,14 +20,15 @@ def _port() -> int:
         return 0
 
 
-def send_event(event: str, **kwargs) -> None:
-    """sends an event to the bot. silent on any failure."""
+def send_event(event: str, **kwargs) -> bool:
+    """sends an event to the bot. returns whether the datagram was sent."""
     port = _port()
     if not port:
-        return
+        return False
     payload = json.dumps({"event": event, **kwargs}).encode("utf-8")
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.sendto(payload, ("127.0.0.1", port))
+        return True
     except OSError:
-        pass
+        return False

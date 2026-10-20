@@ -507,12 +507,20 @@ class TournamentCommands(
             await interaction.followup.send(f"Failed to send: {e}", ephemeral=True)
             return
 
+        if result is None:
+            await interaction.followup.send(
+                "The game didn't respond in time. It may have released — "
+                "check `/tournament list` in a moment.",
+                ephemeral=True,
+            )
+            return
         if isinstance(result, dict) and result.get("released"):
             await interaction.followup.send("Round released.", ephemeral=True)
-        else:
-            await interaction.followup.send(
-                "Could not release (a match may be running).", ephemeral=True
-            )
+            return
+        await interaction.followup.send(
+            "Could not release — a match may be currently running.",
+            ephemeral=True,
+        )
 
     @app_commands.command(name="registrations")
     @app_commands.describe(option="Open or close the registrations")
