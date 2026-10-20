@@ -75,6 +75,17 @@ class SocketTunnel(threading.Thread):
                     }
                 )
             sock.sendto(json.dumps(response).encode("utf-8"), addr)
+        elif action == "release_pending_rounds":
+            # the bot asks the game to fire a queued round start.
+            from tournament.manager import manager
+
+            result = {"released": False}
+            if manager.brackets and not manager.active_match:
+                try:
+                    result["released"] = manager.brackets.release_pending_rounds()
+                except Exception:
+                    pass
+            sock.sendto(json.dumps(result).encode("utf-8"), addr)
 
     def shutdown(self) -> None:
         """shuts down the thread gracefully."""

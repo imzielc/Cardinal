@@ -21,9 +21,6 @@ class BaseSchema:
         """validates the data into the schema."""
         if not data:
             return cls()
-        # pydantic is imported here, not at module load: its cold import
-        # stalls the main thread long enough for the boot GC pass and the
-        # HostSession::Update() check to complain during the mod scan.
         from pydantic import TypeAdapter
         return TypeAdapter(cls).validate_python(data)
 
@@ -51,7 +48,6 @@ class TournamentSchema(BaseSchema):
     active_season: str = "0"
     registrations_status: bool = False
     seasons: dict[str, SeasonSchema] = field(default_factory=dict)
-    # the one registration panel the bot tracks (0 means none).
     panel_channel_id: int = 0
     panel_message_id: int = 0
 
@@ -63,8 +59,7 @@ class MatchTeamSchema(BaseSchema):
     name: str | None = None
     score: int = 0
     series: int = 0
-    # double elimination: a slot is filled by the result of another match, "W:<bracket>:<round>:<match>"
-    # for its winner and "L:..." for its loser. a bye slot never gets a team.
+    # a slot can be filled by another match's winner or loser: "W:<bracket>:<round>:<match>" / "L:...".
     source: str | None = None
     bye: bool = False
 
@@ -80,7 +75,7 @@ class MatchSchema(BaseSchema):
     group_id: str | None = None
     round_id: str | None = None
     last_scores: list[int] = field(default_factory=lambda : [0, 0])
-    # double elimination: "winners", "losers" or "grand-final", and whether a bye decided the match.
+    # "winners", "losers" or "grand-final" in double elimination.
     bracket: str | None = None
     is_bye: bool = False
 
@@ -99,7 +94,6 @@ class RoundSchema(BaseSchema):
     """schema for a round."""
     matches: dict[str, MatchSchema] = field(default_factory=dict)
     status: Status = Status.PENDING
-    # the position of the round in its bracket (1 is the first), the round ids are not always numbers.
     number: int = 0
 
 
@@ -125,12 +119,12 @@ class BracketsMetaSchema(BaseSchema):
     """schema for the brackets meta."""
     mode: TournamentMode = TournamentMode.SINGLE
     started: bool = False
-    # the rounds that can be played right now, as "group-stage" or "<bracket>/<round>"
     active_rounds: list[str] = field(default_factory=list)
     total_rounds: int = 0
     status: Status = Status.PENDING
-    # {"rank": 1, "team": "name"}, filled in when the tournament is over.
     placements: list[dict] = field(default_factory=list)
+    # set when a round transition is waiting for its release window.
+    pending_round_start: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -140,7 +134,6 @@ class MemberSchema(BaseSchema):
     account_id: str = ""
     device_uuid: str = ""
     accepted: bool = False
-    # the unix time the invitation was sent (or last refreshed).
     invited_at: float = 0.0
 
     def to_public(self) -> dict:
@@ -159,19 +152,13 @@ class TeamSchema(BaseSchema):
     captain: str
     status: TeamStatus = TeamStatus.IN_INVITATION
     members: list[MemberSchema] = field(default_factory=list)
-    # the private thread the invitation lives in (0 when there is none).
     thread_id: int = 0
-    # the tracked invitation message inside that thread (0 when not set).
     invitation_message_id: int = 0
-    # the unix time the invitation expires (0 means no expiration).
     expires_at: float = 0.0
-    # discord_id -> unix time they declined. used to cool down re-invites.
+    # discord_id -> unix time of decline. cools down re-invites.
     declined: dict[str, float] = field(default_factory=dict)
-    # the discord role that mentions this team (0 when not set, e.g. solo teams).
     role_id: int = 0
-    # reminders sent so far for this invitation cycle.
     reminders_sent: int = 0
-    # unix time of the last reminder (0 when none sent yet).
     last_reminded_at: float = 0.0
 
 
@@ -179,11 +166,9 @@ class TeamSchema(BaseSchema):
 class RegistrationSchema(BaseSchema):
     """schema for the registration."""
     teams: dict[str, TeamSchema] = field(default_factory=dict)
-    # keys can be a discord id or an account id, values are team ids.
+    # keys can be a discord id or a game account id.
     players: dict[str, str] = field(default_factory=dict)
 
-
-# ---- account linking ----
 
 @dataclass
 class LinkCodeSchema(BaseSchema):
@@ -194,29 +179,17 @@ class LinkCodeSchema(BaseSchema):
 
 @dataclass
 class LinkedSchema(BaseSchema):
-    """discord <-> game account links, independent of any season.
-
-    codes: pending link codes, keyed by the code itself.
-    links: permanent bindings, discord id -> game account id.
-    """
+    """discord <-> game account links, independent of any season."""
     codes: dict[str, LinkCodeSchema] = field(default_factory=dict)
     links: dict[str, str] = field(default_factory=dict)
 
 
-# ---- match threads (bot side) ----
-
 @dataclass
 class MatchThreadsSchema(BaseSchema):
-    """the match threads the bot created for the current round of a season.
-
-    key is the match's stable id (same format as Brackets.list_matches keys),
-    value is the thread id.
-    """
+    """the match threads the bot created for the current round of a season."""
     season_id: str = ""
     threads: dict[str, int] = field(default_factory=dict)
 
-
-# ---- waitlist (bot side, per season) ----
 
 @dataclass
 class WaitlistEntrySchema(BaseSchema):

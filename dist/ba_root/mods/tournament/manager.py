@@ -270,10 +270,8 @@ class Manager:
 
     def start_tournament_session(self) -> None:
         """starts the tournament session."""
-        # set os env to stop server from restarting in between a match and collect player stats.
         os.environ["TOURNAMENT_MATCH"] = self.season_id
-        # send the announcement to the discord server
-        self.brackets.announce_match_start(self.active_match.match.teams[0].name, self.active_match.match.teams[1].name)
+        self.brackets.announce_match_start(self.active_match.match)
         from .activity import TournamentTransitionActivity
 
         session = bascenev1.get_foreground_host_session()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import discord
 from discord import Interaction, app_commands
@@ -33,6 +32,7 @@ from server.enums import (
     TournamentType,
 )
 from tournament import posts, tournament
+from tournament.brackets import round_label
 from tournament.link import link
 from tournament.registration import Registration
 from tournament.schema import SeasonSchema
@@ -479,6 +479,41 @@ class TournamentCommands(
             msg += f" Expired **{len(expired)}** team(s) that were still past deadline."
         await interaction.followup.send(msg, ephemeral=True)
 
+    @app_commands.command(name="release")
+    @require(Authority.LEADER)
+    async def release_round(self, interaction: Interaction) -> None:
+        """releases a pending round start immediately, bypassing the night window."""
+        season_id = tournament.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament season opened currently.", ephemeral=True
+            )
+            return
+
+        from tournament.brackets import Brackets
+        brackets = Brackets(season_id=season_id)
+        if not brackets.read_meta().pending_round_start:
+            await interaction.response.send_message(
+                "No pending round to release.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await GameClient().send_action(
+                "release_pending_rounds", response=True
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Failed to send: {e}", ephemeral=True)
+            return
+
+        if isinstance(result, dict) and result.get("released"):
+            await interaction.followup.send("Round released.", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                "Could not release (a match may be running).", ephemeral=True
+            )
+
     @app_commands.command(name="registrations")
     @app_commands.describe(option="Open or close the registrations")
     @require(Authority.LEADER)
@@ -566,9 +601,11 @@ class TournamentCommands(
         for match_index, (key, match) in enumerate(matches.items(), start=1):
             team1 = match.teams[0].name or "BYE"
             team2 = match.teams[1].name or "BYE"
+            label = round_label(match)
             status = match.status
             line = (
                 f"`Match #{match_index}` | "
+                f"**{label}** | "
                 f"**(1)** `{team1}` vs **(2)** `{team2}` | "
                 f"Status: `{status}`"
             )
@@ -621,7 +658,6 @@ class TournamentCommands(
 
             lines.append(" — ".join(parts))
 
-        # split into messages of ~1900 chars.
         chunks = []
         current = ""
         for line in lines:

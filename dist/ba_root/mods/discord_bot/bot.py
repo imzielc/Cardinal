@@ -9,7 +9,8 @@ from discord.ext import commands
 
 from discord_bot.cogs.account import AccountCommands
 from discord_bot.cogs.general import GeneralCommands
-from discord_bot.cogs.invitation_watcher import TeamInvitationWatcher
+from discord_bot.cogs.watcher import TeamInvitationWatcher
+from discord_bot.cogs.scheduler import RoundScheduler
 from discord_bot.cogs.tournament import TournamentCommands
 from discord_bot.events import EventReceiver
 from discord_bot.held_posts import HeldPosts
@@ -44,6 +45,7 @@ class DiscordBot(commands.Bot):
         await self.add_cog(TournamentCommands(self))
         await self.add_cog(HeldPosts(self))
         await self.add_cog(TeamInvitationWatcher(self))
+        await self.add_cog(RoundScheduler(self))
 
     def _restore_invitations(self) -> None:
         """re-registers the invitation buttons of the pending teams, so they work after a restart."""

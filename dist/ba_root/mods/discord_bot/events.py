@@ -136,11 +136,7 @@ async def _delete_role(bot: commands.Bot, role_id: int) -> None:
 
 
 async def cleanup_expired_team(bot: commands.Bot, team, season) -> None:
-    """removes a removed team's Discord traces: participant role, team role, thread.
-
-    called after `Registration.expire_team()` has already removed the team
-    from the store. no-ops on any missing piece.
-    """
+    """removes a team's discord traces: participant role, team role, thread."""
     channel = None
     if team.thread_id:
         try:
@@ -182,13 +178,7 @@ async def cleanup_expired_team(bot: commands.Bot, team, season) -> None:
 
 
 async def cleanup_expired_teams(bot: commands.Bot, season_id: str) -> list:
-    """expires every team past its deadline, cleans up Discord, promotes waitlist.
-
-    returns the list of expired team objects (already removed from the store).
-    safe to call any time; the watcher uses it on its 5-min loop, and the
-    `/tournament extend` command calls it inline to sweep any team that stayed
-    expired after extension.
-    """
+    """expires every team past its deadline, cleans up, promotes waitlist."""
     registration = Registration(season_id=season_id)
     season = tournament.get_season(season_id)
     removed = []
@@ -209,8 +199,7 @@ async def cleanup_expired_teams(bot: commands.Bot, season_id: str) -> list:
 
 
 async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
-    """deletes every discord trace of a season: participant role, group roles, team roles,
-    invitation threads, and match threads."""
+    """deletes every discord trace of a season: roles, threads, match threads."""
     try:
         season = tournament.get_season(season_id)
     except Exception:
@@ -240,16 +229,11 @@ async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
     match_threads.clear()
 
 
-# ---- waitlist promotion ----
+# ---- waitlist ----
 
 
 async def announce_waitlist_promotion(bot: commands.Bot, season_id: str, info: dict) -> None:
-    """a waitlisted team got promoted into a real slot. sets up their presence on discord:
-    participant role on the captain, team role, private thread, invitation message.
-
-    called from `/tournament leave` and the invitation watcher, after the slot
-    was freed by a team dissolving or expiring.
-    """
+    """sets up discord presence for a team that just left the waitlist."""
     team_id = info.get("team_id")
     captain_id = info.get("captain_discord_id")
     if not team_id or not captain_id:
@@ -335,7 +319,7 @@ async def announce_waitlist_promotion(bot: commands.Bot, season_id: str, info: d
 
 
 async def promote_waitlist_one(bot: commands.Bot, season_id: str) -> None:
-    """asks the registration store to promote one waitlisted team, then announces it."""
+    """promotes one waitlisted team and announces it."""
     try:
         promoted = Registration(season_id=season_id).promote_from_waitlist(slots=1)
     except Exception as e:
@@ -348,16 +332,17 @@ async def promote_waitlist_one(bot: commands.Bot, season_id: str) -> None:
             print(f"Discord: could not announce waitlist promotion: {e}")
 
 
-# ---- match thread formatting ----
+# ---- thread content ----
 
 
 def _match_header(payload_match: dict) -> str:
-    """the second line of the thread's first message: round label, or standings."""
+    """first message body of a match thread. group matches show standings, knockout show the round."""
     stage = payload_match.get("stage")
     team1 = payload_match.get("team1") or "TBD"
     team2 = payload_match.get("team2") or "TBD"
 
     if stage == "group":
+        group = payload_match.get("group_id") or ""
         standings = payload_match.get("standings") or {}
         lines = []
         for name in (team1, team2):
@@ -369,7 +354,8 @@ def _match_header(payload_match: dict) -> str:
                 )
             else:
                 lines.append(f"{name} · no standing")
-        return "Standings:\n" + "\n".join(lines)
+        header = f"**Group {group}**\n" if group else ""
+        return header + "Standings:\n" + "\n".join(lines)
 
     label = payload_match.get("round_label")
     if label:
@@ -381,12 +367,7 @@ def _match_header(payload_match: dict) -> str:
 
 
 async def on_team_verified(bot: commands.Bot, payload: dict) -> None:
-    """fired on every member verification (not just the last).
-
-    refreshes the panel and the invitation view so the reader can see who
-    is still left to verify. once the team is fully verified the view
-    renders in its final, locked-down state.
-    """
+    """refreshes the panel and the invitation view after a member verifies."""
     season_id = str(payload.get("season_id") or "")
     team_id = str(payload.get("team_id") or "")
     if not int(season_id or "0") or not team_id:
@@ -432,17 +413,23 @@ async def on_team_verified(bot: commands.Bot, payload: dict) -> None:
 
 
 async def on_round_started(bot: commands.Bot, payload: dict) -> None:
-    """a new round of matches is playable. refresh the private match threads."""
+    """creates or refreshes match threads, and pings each team in their own thread."""
     season_id = str(payload.get("season_id") or "")
     if not int(season_id or "0"):
         return
 
-    for tid in match_threads.get(season_id).values():
-        await _delete_thread(bot, tid)
-    match_threads.clear()
-
     matches = payload.get("matches") or []
+    existing = match_threads.get(season_id)
+    new_keys = {str(m.get("key") or "") for m in matches if m.get("key")}
+
+    # drop threads for matches that are no longer playable.
+    for key in list(existing.keys()):
+        if key in new_keys:
+            continue
+        await _delete_thread(bot, existing.pop(key))
+
     if not matches:
+        match_threads.set(season_id, existing)
         return
 
     try:
@@ -450,73 +437,128 @@ async def on_round_started(bot: commands.Bot, payload: dict) -> None:
     except (TypeError, ValueError):
         channel_id = 0
     if not channel_id:
+        match_threads.set(season_id, existing)
         return
 
     try:
         channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
     except Exception:
+        match_threads.set(season_id, existing)
         return
 
     registration = Registration(season_id=season_id).read()
-    new_threads: dict[str, int] = {}
+    created_keys: set[str] = set()
 
-    try:
-        for match in matches:
-            key = str(match.get("key") or "")
-            team1_name = match.get("team1") or "TBD"
-            team2_name = match.get("team2") or "TBD"
-            if not key or team1_name == "TBD" or team2_name == "TBD":
+    for match in matches:
+        key = str(match.get("key") or "")
+        team1_name = match.get("team1") or "TBD"
+        team2_name = match.get("team2") or "TBD"
+        if not key or team1_name == "TBD" or team2_name == "TBD":
+            continue
+        if key in existing:
+            continue
+
+        member_ids: list[int] = []
+        role_ids: list[int] = []
+        for tname in (team1_name, team2_name):
+            team = registration.teams.get(tname)
+            if not team:
                 continue
-
-            member_ids: list[int] = []
-            role_ids: list[int] = []
-            for tname in (team1_name, team2_name):
-                team = registration.teams.get(tname)
-                if not team:
-                    continue
-                if team.role_id:
-                    role_ids.append(int(team.role_id))
-                for m in team.members:
-                    try:
-                        member_ids.append(int(m.discord_id))
-                    except (TypeError, ValueError):
-                        pass
-
-            try:
-                thread = await channel.create_thread(
-                    name=f"{team1_name} vs {team2_name}"[:95],
-                    type=discord.ChannelType.private_thread,
-                    invitable=False,
-                    auto_archive_duration=1440,
-                )
-            except Exception as e:
-                print(f"Discord: could not create match thread: {e}")
-                continue
-
-            for mid in member_ids:
+            if team.role_id:
+                role_ids.append(int(team.role_id))
+            for m in team.members:
                 try:
-                    await thread.add_user(discord.Object(id=mid))
-                except Exception:
+                    member_ids.append(int(m.discord_id))
+                except (TypeError, ValueError):
                     pass
 
-            pings = " ".join(f"<@&{rid}>" for rid in role_ids)
-            header = f"{pings}\n" if pings else ""
-            body = _match_header(match)
+        try:
+            thread = await channel.create_thread(
+                name=f"{team1_name} vs {team2_name}"[:95],
+                type=discord.ChannelType.private_thread,
+                invitable=False,
+                auto_archive_duration=1440,
+            )
+        except Exception as e:
+            print(f"Discord: could not create match thread: {e}")
+            continue
+
+        for mid in member_ids:
             try:
-                await thread.send(
-                    f"{header}{body}",
-                    allowed_mentions=discord.AllowedMentions(
-                        roles=[discord.Object(id=rid) for rid in role_ids],
-                        users=False,
-                        everyone=False,
-                    ),
-                )
+                await thread.add_user(discord.Object(id=mid))
             except Exception:
                 pass
 
-            new_threads[key] = thread.id
-    finally:
-        match_threads.set(season_id, new_threads)
+        pings = " ".join(f"<@&{rid}>" for rid in role_ids)
+        header = f"{pings}\n" if pings else ""
+        try:
+            await thread.send(
+                f"{header}{_match_header(match)}",
+                allowed_mentions=discord.AllowedMentions(
+                    roles=[discord.Object(id=rid) for rid in role_ids],
+                    users=False, everyone=False,
+                ),
+            )
+        except Exception:
+            pass
+
+        existing[key] = thread.id
+        created_keys.add(key)
+
+    match_threads.set(season_id, existing)
+
+    # ping each team in their own thread about the matches that were just announced.
+    if not created_keys:
+        return
+
+    team_matches: dict[str, list[tuple[dict, int]]] = {}
+    for match in matches:
+        key = str(match.get("key") or "")
+        if key not in created_keys:
+            continue
+        tid = existing.get(key)
+        if not tid:
+            continue
+        for tname in (match.get("team1"), match.get("team2")):
+            if tname and tname != "TBD":
+                team_matches.setdefault(tname, []).append((match, tid))
+
+    for team_name, entries in team_matches.items():
+        team = registration.teams.get(team_name)
+        if not team or not team.thread_id:
+            continue
+        try:
+            team_thread = (
+                bot.get_channel(team.thread_id)
+                or await bot.fetch_channel(team.thread_id)
+            )
+        except Exception:
+            continue
+        if team_thread is None:
+            continue
+
+        lines = []
+        for match, match_thread_id in entries:
+            opponent = (
+                match.get("team2") if match.get("team1") == team_name
+                else match.get("team1")
+            )
+            label = match.get("round_label") or ""
+            if label:
+                lines.append(f"**{label}** — vs **{opponent}** <#{match_thread_id}>")
+            else:
+                lines.append(f"vs **{opponent}** <#{match_thread_id}>")
+
+        body = "Your team has a match:\n" + "\n".join(lines)
+        content = f"<@&{team.role_id}> {body}" if team.role_id else body
+        mentions = discord.AllowedMentions(
+            roles=[discord.Object(id=team.role_id)] if team.role_id else [],
+            users=False, everyone=False,
+        )
+        try:
+            await team_thread.send(content, allowed_mentions=mentions)
+        except Exception:
+            pass
 
 
 async def on_match_ended(bot: commands.Bot, payload: dict) -> None:
@@ -543,17 +585,19 @@ async def on_tournament_completed(bot: commands.Bot, payload: dict) -> None:
 
 
 async def on_match_announcement(bot: commands.Bot, payload: dict) -> None:
-    """a match is going live. post the announcement directly (no subprocess)."""
+    """a match is going live. post the announcement directly."""
     from tournament.webhook import Webhook
 
     season_id = str(payload.get("season_id") or "")
     role_id = int(payload.get("participant_role_id") or 0)
     team1 = str(payload.get("team1") or "")
     team2 = str(payload.get("team2") or "")
+    label = str(payload.get("round_label") or "")
     if not season_id or not team1 or not team2:
         return
 
-    message = f"<@&{role_id}> **{team1}** vs **{team2}** is live now in the server!"
+    prefix = f"**{label}** — " if label else ""
+    message = f"<@&{role_id}> {prefix}**{team1}** vs **{team2}** is live now in the server!"
     webhook = Webhook(season_id)
     try:
         await asyncio.to_thread(
