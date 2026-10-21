@@ -1,8 +1,11 @@
 """public reads, all redacted."""
 
+import json
+from pathlib import Path
+
 from aiohttp import web
 
-from stats import stats as stats_storage
+from server.storage import DATA_DIR
 from tournament import tournament as tournament_storage
 from tournament.brackets import Brackets
 from tournament.registration import Registration
@@ -22,6 +25,13 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/v1/seasons/{season_id}/stats", season_stats)
     app.router.add_get("/api/v1/seasons/{season_id}/waitlist", season_waitlist)
     app.router.add_get("/api/v1/stats", global_stats)
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 
 def _resolve(season_id: str) -> str:
@@ -137,8 +147,7 @@ async def season_placements(request: web.Request) -> web.Response:
 
 async def season_stats(request: web.Request) -> web.Response:
     sid = _resolve(request.match_info["season_id"])
-    path = SEASONS_DIR / sid / "stats.json"
-    data = stats_storage.read(external_path=path) if path.exists() else {}
+    data = _read_json(SEASONS_DIR / sid / "stats.json")
     return web.json_response({"season_id": sid, "stats": data})
 
 
@@ -155,4 +164,4 @@ async def season_waitlist(request: web.Request) -> web.Response:
 
 
 async def global_stats(request: web.Request) -> web.Response:
-    return web.json_response({"stats": stats_storage.read()})
+    return web.json_response({"stats": _read_json(DATA_DIR / "stats" / "stats.json")})

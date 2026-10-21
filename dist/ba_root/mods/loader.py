@@ -47,7 +47,7 @@ def _ensure_api() -> None:
     env["PYTHONPATH"] = str(MODS_DIR)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     subprocess.Popen(
-        [uv, "run", str(MODS_DIR / "api" / "run.py")],
+        [uv, "run", str(MODS_DIR / "api" / "server.py")],
         cwd=str(MODS_DIR),
         env=env,
         start_new_session=True,
