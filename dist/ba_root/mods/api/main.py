@@ -3,10 +3,6 @@
 import sys
 from pathlib import Path
 
-# sys.path[0] is the directory of whatever file was launched. when we're
-# run as a script, that's mods/api/, and `from server import config` would
-# find this file instead of the server/ package. prepend mods/ so packages
-# resolve correctly no matter how this file is started.
 _MODS = Path(__file__).resolve().parent.parent
 if str(_MODS) not in sys.path:
     sys.path.insert(0, str(_MODS))
