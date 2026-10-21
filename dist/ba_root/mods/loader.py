@@ -32,7 +32,7 @@ def _ensure_api() -> None:
     port = int(config.api.port)
     try:
         urllib.request.urlopen(
-            f"http://{host}:{port}/api/v1/health", timeout=2
+            f"http://{host}:{port}/v1/health", timeout=2
         ).close()
         return
     except Exception:
@@ -46,15 +46,17 @@ def _ensure_api() -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(MODS_DIR)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    subprocess.Popen(
-        [uv, "run", str(MODS_DIR / "api" / "main.py")],
-        cwd=str(MODS_DIR),
-        env=env,
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    print("[api] spawned the api in the background")
+    log_path = MODS_DIR / "api" / "api.log"
+    with open(log_path, "a") as log:
+        subprocess.Popen(
+            [uv, "run", str(MODS_DIR / "api" / "main.py")],
+            cwd=str(MODS_DIR),
+            env=env,
+            start_new_session=True,
+            stdout=log,
+            stderr=log,
+        )
+    print(f"[api] spawned the api in the background (logs: {log_path})")
 
 def _pull_updates() -> None:
     """pulls the latest commits in the background. new code applies next restart.

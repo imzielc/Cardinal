@@ -4,7 +4,7 @@ from server import config
 
 
 def register(app: web.Application) -> None:
-    app.router.add_get("/api/v1/health", handler)
+    app.router.add_get("/v1/health", handler)
 
 
 async def handler(request: web.Request) -> web.Response:

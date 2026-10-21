@@ -13,10 +13,10 @@ from ..revoked import revoked
 
 
 def register(app: web.Application) -> None:
-    app.router.add_post("/api/v1/auth/login", login)
-    app.router.add_post("/api/v1/auth/logout", logout)
-    app.router.add_get("/api/v1/auth/discord/url", discord_url)
-    app.router.add_get("/api/v1/auth/discord/callback", discord_callback)
+    app.router.add_post("/v1/auth/login", login)
+    app.router.add_post("/v1/auth/logout", logout)
+    app.router.add_get("/v1/auth/discord/url", discord_url)
+    app.router.add_get("/v1/auth/discord/callback", discord_callback)
 
 
 def _oauth_configured() -> bool:
@@ -73,7 +73,7 @@ async def discord_url(request: web.Request) -> web.Response:
         return web.json_response({"error": "oauth_not_configured"}, status=501)
     oauth = config.api.get("discord_oauth")
     redirect = str(oauth.get("redirect_uri") or "") or (
-        f"{config.api.public_url}/api/v1/auth/discord/callback"
+        f"{config.api.public_url}/v1/auth/discord/callback"
     )
     url = (
         "https://discord.com/oauth2/authorize"
@@ -95,7 +95,7 @@ async def discord_callback(request: web.Request) -> web.Response:
 
     oauth = config.api.get("discord_oauth")
     redirect = str(oauth.get("redirect_uri") or "") or (
-        f"{config.api.public_url}/api/v1/auth/discord/callback"
+        f"{config.api.public_url}/v1/auth/discord/callback"
     )
 
     async with aiohttp.ClientSession() as session:

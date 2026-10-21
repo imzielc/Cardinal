@@ -9,14 +9,13 @@ from tournament.registration import Registration
 from .. import serializers as s
 from ..audit import audit
 
-
 def register(app: web.Application) -> None:
-    app.router.add_get("/api/v1/admin/links", admin_links)
+    app.router.add_get("/v1/admin/links", admin_links)
     app.router.add_post(
-        "/api/v1/seasons/{season_id}/matches/{match_key}/win/{team_idx}", give_win
+        "/v1/seasons/{season_id}/matches/{match_key}/win/{team_idx}", give_win
     )
     app.router.add_post(
-        "/api/v1/seasons/{season_id}/players/{discord_id}/uuid", change_uuid
+        "/v1/seasons/{season_id}/players/{discord_id}/uuid", change_uuid
     )
 
 

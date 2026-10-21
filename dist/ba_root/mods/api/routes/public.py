@@ -15,16 +15,16 @@ from .. import serializers as s
 
 
 def register(app: web.Application) -> None:
-    app.router.add_get("/api/v1/seasons", list_seasons)
-    app.router.add_get("/api/v1/seasons/{season_id}", season_info)
-    app.router.add_get("/api/v1/seasons/{season_id}/teams", season_teams)
-    app.router.add_get("/api/v1/seasons/{season_id}/rounds", season_rounds)
-    app.router.add_get("/api/v1/seasons/{season_id}/matches", season_matches)
-    app.router.add_get("/api/v1/seasons/{season_id}/group-stage", season_group_stage)
-    app.router.add_get("/api/v1/seasons/{season_id}/placements", season_placements)
-    app.router.add_get("/api/v1/seasons/{season_id}/stats", season_stats)
-    app.router.add_get("/api/v1/seasons/{season_id}/waitlist", season_waitlist)
-    app.router.add_get("/api/v1/stats", global_stats)
+    app.router.add_get("/v1/seasons", list_seasons)
+    app.router.add_get("/v1/seasons/{season_id}", season_info)
+    app.router.add_get("/v1/seasons/{season_id}/teams", season_teams)
+    app.router.add_get("/v1/seasons/{season_id}/rounds", season_rounds)
+    app.router.add_get("/v1/seasons/{season_id}/matches", season_matches)
+    app.router.add_get("/v1/seasons/{season_id}/group-stage", season_group_stage)
+    app.router.add_get("/v1/seasons/{season_id}/placements", season_placements)
+    app.router.add_get("/v1/seasons/{season_id}/stats", season_stats)
+    app.router.add_get("/v1/seasons/{season_id}/waitlist", season_waitlist)
+    app.router.add_get("/v1/stats", global_stats)
 
 
 def _read_json(path: Path) -> dict:
