@@ -47,13 +47,45 @@ class Config(Storage):
         """creates essential files."""
         template = self.read(self.template_file)
         if not self.path.exists():
-            # mhm.. we take it from template file.
             self.commit(template)
+            self._bootstrap_secrets()
             return
 
         # add the settings that were introduced after the file was created.
         config = self.read()
         if self._merge_missing(config, template):
+            self.commit(config)
+        self._bootstrap_secrets()
+
+    def _bootstrap_secrets(self) -> None:
+        """fills the api secrets on boot. the code is generated only if you didn't set one."""
+        import secrets as _secrets
+
+        config = self.read()
+        api = dict(config.get("api") or {})
+        if not api.get("enable"):
+            return
+
+        changed = False
+        if not api.get("jwt_secret"):
+            api["jwt_secret"] = _secrets.token_hex(32)
+            changed = True
+        if not api.get("master_token"):
+            api["master_token"] = _secrets.token_hex(32)
+            changed = True
+        if not api.get("secret_code"):
+            alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+            code = "".join(_secrets.choice(alphabet) for _ in range(16))
+            api["secret_code"] = code
+            print(
+                f"\n[api] generated your secret code: {code}\n"
+                "      it's saved in mods_config.json under api.secret_code.\n"
+                "      change it any time to something you'll remember.\n"
+            )
+            changed = True
+
+        if changed:
+            config["api"] = api
             self.commit(config)
 
     @staticmethod

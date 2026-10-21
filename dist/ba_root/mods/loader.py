@@ -2,6 +2,7 @@
 
 # ba_meta require api 9
 import shutil
+import os, sys
 import subprocess
 import threading
 import time
@@ -18,6 +19,42 @@ RESET = "\033[0m"
 AUTO_PULL_DELAY_SECONDS = 30
 AUTO_PULL_TIMEOUT_SECONDS = 30
 
+def _ensure_api() -> None:
+    """spawns the api with `uv run` if it's not already up.
+
+    the api restarts itself on crash; this only handles "never started".
+    """
+    import urllib.request
+    from server import config
+    from server.storage import MODS_DIR
+
+    host = str(config.api.host)
+    port = int(config.api.port)
+    try:
+        urllib.request.urlopen(
+            f"http://{host}:{port}/api/v1/health", timeout=2
+        ).close()
+        return
+    except Exception:
+        pass
+
+    uv = shutil.which("uv")
+    if not uv:
+        print("[api] uv not found, cannot spawn the api")
+        return
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(MODS_DIR)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    subprocess.Popen(
+        [uv, "run", str(MODS_DIR / "api" / "run.py")],
+        cwd=str(MODS_DIR),
+        env=env,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    print("[api] spawned the api in the background")
 
 def _pull_updates() -> None:
     """pulls the latest commits in the background. new code applies next restart.
@@ -74,6 +111,13 @@ def _pull_updates() -> None:
     if out and "Already up" not in out:
         print(f"[auto-pull] pulled:\n{out}")
 
+def _startup_tasks() -> None:
+    """runs the api check and the auto-pull in order, off the game thread."""
+    from server import config
+
+    if config.api.enable:
+        _ensure_api()
+    _pull_updates()
 
 # ba_meta export babase.Plugin
 class Load(babase.Plugin):
@@ -127,6 +171,5 @@ class Load(babase.Plugin):
         # reload hooks.
         bascenev1.reload_hooks()
 
-        # pull updates in the background after boot. this cycle keeps running
-        # the code it already loaded; the pulled code applies next restart.
-        threading.Thread(target=_pull_updates, daemon=True).start()
+        # spawn api and auto-pull in the background.
+        threading.Thread(target=_startup_tasks, daemon=True).start()

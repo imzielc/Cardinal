@@ -620,12 +620,56 @@ class Brackets(Storage):
 
         return matches
 
-    def give_win_to_team(self, match_index: int, team_index: int, force: bool = False) -> str:
-        """gives the win to the team."""
-        if team_index not in (1, 2):
-            return "Team index must be either 1 or 2."
-        team_index -= 1
+    def give_win_by_key(
+        self, match_key: str, team_index: int, force: bool = False
+    ) -> tuple[bool, str, MatchSchema | None]:
+        """gives the win to a team, addressed by the match's key.
 
+        returns (ok, message, match), where match is the updated schema on
+        success or the existing match when it was already completed.
+        """
+        if team_index not in (1, 2):
+            return False, "Team index must be either 1 or 2.", None
+
+        matches = self.list_matches()
+        if not matches:
+            return False, "No active round.", None
+
+        if match_key not in matches:
+            return False, "No such match.", None
+
+        match = matches[match_key]
+        if match.status == Status.COMPLETED and not force:
+            return False, "Match is already completed", match
+
+        team_index -= 1
+        from tournament import tournament
+
+        series_length = tournament.series_length
+        match.winner_idx = team_index
+        match.loser_idx = 1 - team_index
+
+        team = match.teams[team_index]
+        team.score = series_length * 4
+        team.series = series_length
+
+        if match.group_id:
+            self.update_gs_match(match=match)
+        else:
+            self.update_match(match=match)
+
+        self.send_results(match, match_key)
+        self.send_players_dashboard()
+        return True, f"Given {team.name} win.", match
+
+    def give_win_to_team(
+        self, match_index: int, team_index: int, force: bool = False
+    ) -> str:
+        """gives the win to the team, addressed by its position in the current matches.
+
+        thin wrapper for the /tournament win command; the API uses
+        give_win_by_key so a stale index can't award the wrong match.
+        """
         matches = self.list_matches()
         if not matches:
             return "No active round."
@@ -634,31 +678,10 @@ class Brackets(Storage):
         if match_index < 1 or match_index > len(match_ids):
             return f"Invalid match index. Must be between 1 and {len(match_ids)}."
 
-        match_id = match_ids[match_index - 1]
-
-        if match_id not in matches:
-            return "No such match."
-
-        match = matches[match_id]
-        if match.status != Status.COMPLETED or force:
-            from tournament import tournament
-            series_length = tournament.series_length
-            match.winner_idx = team_index
-            match.loser_idx = 1 - team_index
-
-            team = match.teams[team_index]
-            team.score = series_length * 4
-            team.series = series_length
-
-            if match.group_id:
-                self.update_gs_match(match=match)
-            else:
-                self.update_match(match=match)
-
-            self.send_results(match, match_id)
-            self.send_players_dashboard()
-            return f"Given {team.name} win."
-        return "Match is already completed"
+        _, message, _ = self.give_win_by_key(
+            match_ids[match_index - 1], team_index, force=force
+        )
+        return message
 
     def get_team(self, team_id: str) -> TeamSchema:
         """returns the full team information dict."""

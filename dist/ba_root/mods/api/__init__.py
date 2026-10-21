@@ -1,0 +1,1 @@
+"""cardinal api — independent HTTP surface over the tournament database."""

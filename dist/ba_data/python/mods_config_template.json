@@ -1,4 +1,20 @@
 {
+    "api": {
+        "enable": false,
+        "host": "127.0.0.1",
+        "port": 8080,
+        "public_url": "",
+        "frontend_url": "",
+        "cookie_domain": "",
+        "cf_tunnel_token": "",
+        "jwt_secret": "",
+        "secret_code": "",
+        "master_token": "",
+        "discord_oauth": {
+            "client_id": "",
+            "client_secret": ""
+        }
+    },
     "auto_pull": true,
     "stats": {
         "enable": false,
