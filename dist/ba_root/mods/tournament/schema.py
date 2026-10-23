@@ -115,6 +115,11 @@ class GroupStageSchema(BaseSchema):
     winning_teams_per_group: int = 0
     status: Status = Status.PENDING
 
+@dataclass
+class PlacementSchema(BaseSchema):
+    """final rank of a team in a completed bracket."""
+    rank: int = 0
+    team: str = ""
 
 @dataclass
 class BracketsMetaSchema(BaseSchema):
@@ -124,7 +129,7 @@ class BracketsMetaSchema(BaseSchema):
     active_rounds: list[str] = field(default_factory=list)
     total_rounds: int = 0
     status: Status = Status.PENDING
-    placements: list[dict] = field(default_factory=list)
+    placements: list[PlacementSchema] = field(default_factory=list)
     # set when a round transition is waiting for its release window.
     pending_round_start: list[dict] = field(default_factory=list)
 
@@ -162,6 +167,12 @@ class TeamSchema(BaseSchema):
     role_id: int = 0
     reminders_sent: int = 0
     last_reminded_at: float = 0.0
+
+    def to_public(self) -> dict:
+        """masks sensitive member fields and returns the dict."""
+        data = self.to_dict()
+        data["members"] = [m.to_public() for m in self.members]
+        return data
 
 
 @dataclass
@@ -206,3 +217,13 @@ class WaitlistEntrySchema(BaseSchema):
 class WaitlistSchema(BaseSchema):
     """queued teams for a season, oldest first."""
     entries: list[WaitlistEntrySchema] = field(default_factory=list)
+
+@dataclass
+class PlayerStatsSchema(BaseSchema):
+    """a player's stats in a season (mirrors the shape in stats.json)."""
+    name: str = ""
+    score: int = 0
+    kills: int = 0
+    deaths: int = 0
+    games: int = 0
+    rank: int = 0

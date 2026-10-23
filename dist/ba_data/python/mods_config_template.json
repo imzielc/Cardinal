@@ -1,6 +1,7 @@
 {
     "api": {
         "enable": false,
+        "dev_reload": false,
         "host": "127.0.0.1",
         "port": 8080,
         "public_url": "",

@@ -1,30 +1,25 @@
-"""public reads, all redacted."""
+"""public reads. team members are redacted when the request is anonymous."""
 
 import json
 from pathlib import Path
 
 from aiohttp import web
 
-from server.storage import DATA_DIR
 from tournament import tournament as tournament_storage
 from tournament.brackets import Brackets
 from tournament.registration import Registration
+from tournament.schema import (
+    GroupStageSchema,
+    MatchSchema,
+    PlacementSchema,
+    PlayerStatsSchema,
+    TeamSchema,
+    WaitlistEntrySchema,
+)
 from tournament.storage import SEASONS_DIR
 from tournament.waitlist import Waitlist
-from .. import serializers as s
-
-
-def register(app: web.Application) -> None:
-    app.router.add_get("/v1/seasons", list_seasons)
-    app.router.add_get("/v1/seasons/{season_id}", season_info)
-    app.router.add_get("/v1/seasons/{season_id}/teams", season_teams)
-    app.router.add_get("/v1/seasons/{season_id}/rounds", season_rounds)
-    app.router.add_get("/v1/seasons/{season_id}/matches", season_matches)
-    app.router.add_get("/v1/seasons/{season_id}/group-stage", season_group_stage)
-    app.router.add_get("/v1/seasons/{season_id}/placements", season_placements)
-    app.router.add_get("/v1/seasons/{season_id}/stats", season_stats)
-    app.router.add_get("/v1/seasons/{season_id}/waitlist", season_waitlist)
-    app.router.add_get("/v1/stats", global_stats)
+from api.registry import route
+from api.schema import RoundsResponse, SeasonsListResponse, SeasonInfoResponse
 
 
 def _read_json(path: Path) -> dict:
@@ -43,38 +38,51 @@ def _resolve(season_id: str) -> str:
     return season_id
 
 
+@route("GET", "/v1/seasons", response=SeasonsListResponse)
 async def list_seasons(request: web.Request) -> web.Response:
+    """All seasons, plus which one is active."""
     db = tournament_storage.read()
     return web.json_response({
         "active_season": db.active_season,
-        "seasons": {sid: s.season(sch) for sid, sch in db.seasons.items()},
+        "seasons": {sid: sch.to_dict() for sid, sch in db.seasons.items()},
     })
 
 
+@route("GET", "/v1/seasons/{season_id}", response=SeasonInfoResponse)
 async def season_info(request: web.Request) -> web.Response:
+    """One season's info. Use 'active' for the running one."""
     sid = _resolve(request.match_info["season_id"])
     season = tournament_storage.get_season(sid)
     if season is None:
         raise web.HTTPNotFound(reason="No such season.")
     return web.json_response({
+        **season.to_dict(),
         "season_id": sid,
         "is_active": sid == tournament_storage.active_season,
         "registrations_open": tournament_storage.are_registrations_open,
-        **s.season(season),
     })
 
 
+@route(
+    "GET",
+    "/v1/seasons/{season_id}/teams",
+    response=list[TeamSchema],
+    redacted=True,
+)
 async def season_teams(request: web.Request) -> web.Response:
+    """Teams of a season. Redacted without auth, full data with auth."""
     sid = _resolve(request.match_info["season_id"])
     reg = Registration(sid).read()
     auth = request.get("auth")
-    return web.json_response({
-        "season_id": sid,
-        "teams": [s.team(t, auth) for t in reg.teams.values()],
-    })
+    return web.json_response([
+        t.to_dict() if auth is not None else t.to_public()
+        for t in reg.teams.values()
+    ])
 
 
+@route("GET", "/v1/seasons/{season_id}/rounds", response=RoundsResponse)
 async def season_rounds(request: web.Request) -> web.Response:
+    """Round structure of the season's bracket."""
     sid = _resolve(request.match_info["season_id"])
     brackets = Brackets(sid)
     meta = brackets.read_meta()
@@ -91,7 +99,7 @@ async def season_rounds(request: web.Request) -> web.Response:
         try:
             gs = brackets.read_gs()
             out["rounds"] = {
-                gid: {rid: s.round_(rd) for rid, rd in g.rounds.items()}
+                gid: {rid: rd.to_dict() for rid, rd in g.rounds.items()}
                 for gid, g in gs.groups.items()
             }
         except Exception:
@@ -100,7 +108,7 @@ async def season_rounds(request: web.Request) -> web.Response:
         try:
             stage = brackets.read_stage()
             out["rounds"] = {
-                bracket: {rid: s.round_(rd) for rid, rd in rounds.items()}
+                bracket: {rid: rd.to_dict() for rid, rd in rounds.items()}
                 for bracket, rounds in stage.items()
             }
         except Exception:
@@ -108,60 +116,71 @@ async def season_rounds(request: web.Request) -> web.Response:
     return web.json_response(out)
 
 
+@route(
+    "GET",
+    "/v1/seasons/{season_id}/matches",
+    response=dict[str, MatchSchema],
+)
 async def season_matches(request: web.Request) -> web.Response:
+    """Matches playable right now, keyed by their match key."""
     sid = _resolve(request.match_info["season_id"])
     try:
         matches = Brackets(sid).list_matches()
     except Exception:
         matches = {}
-    return web.json_response({
-        "season_id": sid,
-        "matches": [{"key": k, **s.match(m)} for k, m in matches.items()],
-    })
+    return web.json_response({k: m.to_dict() for k, m in matches.items()})
 
 
+@route(
+    "GET",
+    "/v1/seasons/{season_id}/group-stage",
+    response=GroupStageSchema,
+)
 async def season_group_stage(request: web.Request) -> web.Response:
+    """Group stage with standings. 404 if the season has no group stage."""
     sid = _resolve(request.match_info["season_id"])
     try:
         gs = Brackets(sid).read_gs()
     except Exception:
         raise web.HTTPNotFound(reason="No group stage for this season.")
-    return web.json_response({
-        "season_id": sid,
-        "winning_teams_per_group": gs.winning_teams_per_group,
-        "status": gs.status.value,
-        "groups": {gid: s.group(g) for gid, g in gs.groups.items()},
-    })
+    return web.json_response(gs.to_dict())
 
 
+@route(
+    "GET",
+    "/v1/seasons/{season_id}/placements",
+    response=list[PlacementSchema],
+)
 async def season_placements(request: web.Request) -> web.Response:
+    """Final rankings. 404 until the tournament completes."""
     sid = _resolve(request.match_info["season_id"])
     meta = Brackets(sid).read_meta()
     if not meta.placements:
         raise web.HTTPNotFound(reason="Tournament is not completed.")
-    return web.json_response({
-        "season_id": sid,
-        "placements": [s.placement(p) for p in meta.placements],
-    })
+    return web.json_response([p.to_dict() for p in meta.placements])
 
 
+@route(
+    "GET",
+    "/v1/seasons/{season_id}/stats",
+    response=dict[str, PlayerStatsSchema],
+)
 async def season_stats(request: web.Request) -> web.Response:
+    """Per-season player stats, keyed by account id."""
     sid = _resolve(request.match_info["season_id"])
-    data = _read_json(SEASONS_DIR / sid / "stats.json")
-    return web.json_response({"season_id": sid, "stats": data})
+    return web.json_response(_read_json(SEASONS_DIR / sid / "stats.json"))
 
 
+@route(
+    "GET",
+    "/v1/seasons/{season_id}/waitlist",
+    response=list[WaitlistEntrySchema],
+)
 async def season_waitlist(request: web.Request) -> web.Response:
+    """Teams queued for the season."""
     sid = _resolve(request.match_info["season_id"])
     try:
         entries = Waitlist(sid).read().entries
     except Exception:
         entries = []
-    return web.json_response({
-        "season_id": sid,
-        "waitlist": [s.waitlist_entry(e) for e in entries],
-    })
-
-
-async def global_stats(request: web.Request) -> web.Response:
-    return web.json_response({"stats": _read_json(DATA_DIR / "stats" / "stats.json")})
+    return web.json_response([e.to_dict() for e in entries])

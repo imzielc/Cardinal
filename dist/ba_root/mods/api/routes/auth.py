@@ -8,15 +8,15 @@ from aiohttp import web
 from server import config
 from roles import roles
 from server.enums import Authority
-from .. import auth as auth_lib
-from ..revoked import revoked
-
-
-def register(app: web.Application) -> None:
-    app.router.add_post("/v1/auth/login", login)
-    app.router.add_post("/v1/auth/logout", logout)
-    app.router.add_get("/v1/auth/discord/url", discord_url)
-    app.router.add_get("/v1/auth/discord/callback", discord_callback)
+from api import auth as auth_lib
+from api.registry import route
+from api.revoked import revoked
+from api.schema import (
+    DiscordUrlResponse,
+    LoginRequest,
+    LoginResponse,
+    OkResponse,
+)
 
 
 def _oauth_configured() -> bool:
@@ -38,7 +38,9 @@ def _set_session_cookie(response: web.Response, token: str) -> None:
     response.set_cookie("admin_session", token, **kwargs)
 
 
+@route("POST", "/v1/auth/login", body=LoginRequest, response=LoginResponse)
 async def login(request: web.Request) -> web.Response:
+    """Logs in with the secret code from config."""
     try:
         body = await request.json()
     except Exception:
@@ -58,7 +60,9 @@ async def login(request: web.Request) -> web.Response:
     return response
 
 
+@route("POST", "/v1/auth/logout", response=OkResponse, auth="required")
 async def logout(request: web.Request) -> web.Response:
+    """Revokes the caller's JWT."""
     auth = request.get("auth")
     if auth and auth.get("jti"):
         exp = int(time.time() + auth_lib.JWT_TTL_SECONDS)
@@ -68,7 +72,9 @@ async def logout(request: web.Request) -> web.Response:
     return response
 
 
+@route("GET", "/v1/auth/discord/url", response=DiscordUrlResponse)
 async def discord_url(request: web.Request) -> web.Response:
+    """Discord OAuth URL. 501 if OAuth not configured."""
     if not _oauth_configured():
         return web.json_response({"error": "oauth_not_configured"}, status=501)
     oauth = config.api.get("discord_oauth")
@@ -85,7 +91,14 @@ async def discord_url(request: web.Request) -> web.Response:
     return web.json_response({"url": url})
 
 
+@route(
+    "GET",
+    "/v1/auth/discord/callback",
+    response=LoginResponse,
+    query={"code": "string"},
+)
 async def discord_callback(request: web.Request) -> web.Response:
+    """Discord OAuth callback. 501 if OAuth not configured."""
     if not _oauth_configured():
         return web.json_response({"error": "oauth_not_configured"}, status=501)
 

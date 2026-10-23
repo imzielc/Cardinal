@@ -1,5 +1,6 @@
 """downloads and keep-alives a cloudflared tunnel subprocess."""
 
+import os
 import platform
 import shutil
 import subprocess
@@ -11,11 +12,14 @@ from server import config
 from server.storage import MODS_DIR
 
 BIN_DIR = MODS_DIR / "api" / "bin"
+PID_FILE = BIN_DIR / "cloudflared.pid"
 DOWNLOAD_URL = (
     "https://github.com/cloudflare/cloudflared/releases/latest/download/"
     "cloudflared-linux-{arch}"
 )
 RESPAWN_DELAY = 5
+
+_started = False
 
 
 def _arch() -> str:
@@ -48,6 +52,19 @@ def _ensure_binary() -> Path | None:
     return target
 
 
+def _read_running_pid() -> int | None:
+    """returns the pid of a still-running cloudflared, or None."""
+    try:
+        pid = int(PID_FILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return None
+    return pid
+
+
 def _keep_alive(binary: Path, token: str) -> None:
     while True:
         try:
@@ -57,6 +74,8 @@ def _keep_alive(binary: Path, token: str) -> None:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
+            PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+            PID_FILE.write_text(str(proc.pid))
             proc.wait()
         except Exception as e:
             print(f"[api] cloudflared spawn failed: {e}")
@@ -64,13 +83,27 @@ def _keep_alive(binary: Path, token: str) -> None:
 
 
 def start() -> None:
-    """spawns cloudflared in a daemon thread. no-op when the token is empty."""
+    """spawns cloudflared in a daemon thread, unless one is already running
+    from an earlier process (dev_reload preserves it via the pid file)."""
+    global _started
+    if _started:
+        return
+
     token = str(config.api.get("cf_tunnel_token") or "").strip()
     if not token:
         return
+
+    existing = _read_running_pid()
+    if existing is not None:
+        _started = True
+        print(f"[api] cloudflared already running (pid {existing}), reusing it")
+        return
+
     binary = _ensure_binary()
     if binary is None:
         return
+
+    _started = True
     threading.Thread(
         target=_keep_alive, args=(binary, token), daemon=True, name="cloudflared"
     ).start()

@@ -14,7 +14,7 @@ from __future__ import annotations
 import random
 
 from server.enums import Status, TournamentMode
-from tournament.schema import MatchSchema, MatchTeamSchema, RoundSchema
+from tournament.schema import MatchSchema, MatchTeamSchema, PlacementSchema, RoundSchema
 
 Stage = dict[str, dict[str, RoundSchema]]
 
@@ -381,8 +381,7 @@ def playable(stage: Stage) -> list[MatchSchema]:
 # ---- the end ----
 
 
-def outcome(stage: Stage, mode: TournamentMode) -> tuple[bool, list[dict]]:
-    """whether the bracket is over, and the final ranks ({"rank", "team"}) when it is."""
+def outcome(stage: Stage, mode: TournamentMode) -> tuple[bool, list[PlacementSchema]]:
     if mode == TournamentMode.DOUBLE:
         matches = stage[GRAND_FINAL]["1"].matches
         decider = matches["2"] if "2" in matches else matches["1"]
@@ -397,17 +396,15 @@ def outcome(stage: Stage, mode: TournamentMode) -> tuple[bool, list[dict]]:
     for match_id, rank in (("1", 1), ("2", 3)):
         match = finals.matches.get(match_id)
         if match:
-            placements.append({"rank": rank, "team": match.teams[match.winner_idx].name})
-            placements.append({"rank": rank + 1, "team": match.teams[match.loser_idx].name})
+            placements.append(PlacementSchema(rank=rank, team=match.teams[match.winner_idx].name))
+            placements.append(PlacementSchema(rank=rank + 1, team=match.teams[match.loser_idx].name))
     return True, placements
 
 
-def _double_placements(stage: Stage, decider: MatchSchema) -> list[dict]:
-    """final ranks, by the order the teams were knocked out. teams knocked out in the same round
-    share a rank (there is no third place match: the team that lost the losers final is third)."""
+def _double_placements(stage: Stage, decider: MatchSchema) -> list[PlacementSchema]:
     result = [
-        {"rank": 1, "team": decider.teams[decider.winner_idx].name},
-        {"rank": 2, "team": decider.teams[decider.loser_idx].name},
+        PlacementSchema(rank=1, team=decider.teams[decider.winner_idx].name),
+        PlacementSchema(rank=2, team=decider.teams[decider.loser_idx].name),
     ]
 
     by_round: dict[int, list[str]] = {}
@@ -419,6 +416,6 @@ def _double_placements(stage: Stage, decider: MatchSchema) -> list[dict]:
     rank = 3
     for number in sorted(by_round, reverse=True):
         for team in by_round[number]:
-            result.append({"rank": rank, "team": team})
+            result.append(PlacementSchema(rank=rank, team=team))
         rank += len(by_round[number])
     return result

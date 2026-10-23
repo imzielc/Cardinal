@@ -5,8 +5,8 @@ from traceback import format_exc
 from aiohttp import web
 
 from server import config
-from .auth import is_master_token, verify_jwt
-from .revoked import revoked
+from api.auth import is_master_token, verify_jwt
+from api.revoked import revoked
 
 
 def _authenticate(request: web.Request) -> dict | None:

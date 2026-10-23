@@ -3,26 +3,15 @@
 from aiohttp import web
 
 from server import config
-from . import cloudflared
-from .auth import _load_jwt
-from .middlewares import (
+from api import cloudflared
+from api.auth import _load_jwt
+from api.middlewares import (
     auth_middleware,
     cache_middleware,
     cors_middleware,
     error_middleware,
 )
-from .routes import register
-
-
-def create_app() -> web.Application:
-    app = web.Application(middlewares=[
-        error_middleware,
-        cors_middleware,
-        auth_middleware,
-        cache_middleware,
-    ])
-    register(app)
-    return app
+from api.routes import register
 
 
 def run_app() -> None:
@@ -34,11 +23,20 @@ def run_app() -> None:
     _load_jwt()
     cloudflared.start()
 
+    app = web.Application(middlewares=[
+        error_middleware,
+        cors_middleware,
+        auth_middleware,
+        cache_middleware,
+    ])
+    for warning in register(app):
+        print(f"[api] {warning}")
+
     host = str(config.api.host)
     port = int(config.api.port)
     public = str(config.api.get("public_url") or "")
     line = f"[api] listening on http://{host}:{port}"
     if public:
-        line += f"  (public: {public})"
+        line += f"  public: {public}"
     print(line)
-    web.run_app(create_app(), host=host, port=port, print=None, access_log=None)
+    web.run_app(app, host=host, port=port, print=None, access_log=None)

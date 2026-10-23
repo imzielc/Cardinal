@@ -1,4 +1,4 @@
-"""auth-gated routes: reads over the private surface, and the two mutations."""
+"""auth-gated routes: private reads and mutations."""
 
 from aiohttp import web
 
@@ -6,17 +6,9 @@ from tournament import tournament as tournament_storage
 from tournament.brackets import Brackets
 from tournament.link import link as link_storage
 from tournament.registration import Registration
-from .. import serializers as s
-from ..audit import audit
-
-def register(app: web.Application) -> None:
-    app.router.add_get("/v1/admin/links", admin_links)
-    app.router.add_post(
-        "/v1/seasons/{season_id}/matches/{match_key}/win/{team_idx}", give_win
-    )
-    app.router.add_post(
-        "/v1/seasons/{season_id}/players/{discord_id}/uuid", change_uuid
-    )
+from api.audit import audit
+from api.registry import route
+from api.schema import LinksResponse, OkResponse, UuidUpdateRequest, WinResponse
 
 
 def _require_auth(request: web.Request) -> None:
@@ -37,7 +29,9 @@ def _resolve(season_id: str) -> str:
     return season_id
 
 
+@route("GET", "/v1/admin/links", response=LinksResponse, auth="required")
 async def admin_links(request: web.Request) -> web.Response:
+    """Every discord<->account link, plus the pending code count."""
     _require_auth(request)
     db = link_storage.read()
     return web.json_response({
@@ -46,7 +40,15 @@ async def admin_links(request: web.Request) -> web.Response:
     })
 
 
+@route(
+    "POST",
+    "/v1/seasons/{season_id}/matches/{match_key}/win/{team_idx}",
+    response=WinResponse,
+    auth="required",
+    params={"team_idx": "1 | 2"},
+)
 async def give_win(request: web.Request) -> web.Response:
+    """Awards the win to team 1 or 2 of a match."""
     _require_auth(request)
     sid = _resolve(request.match_info["season_id"])
     try:
@@ -67,11 +69,19 @@ async def give_win(request: web.Request) -> web.Response:
     return web.json_response({
         "ok": True,
         "message": message,
-        "match": s.match(match) if match else None,
+        "match": match.to_dict() if match else None,
     })
 
 
+@route(
+    "POST",
+    "/v1/seasons/{season_id}/players/{discord_id}/uuid",
+    response=OkResponse,
+    auth="required",
+    body=UuidUpdateRequest,
+)
 async def change_uuid(request: web.Request) -> web.Response:
+    """Updates the device uuid of a registered player."""
     _require_auth(request)
     sid = _resolve(request.match_info["season_id"])
     discord_id = str(request.match_info["discord_id"])
