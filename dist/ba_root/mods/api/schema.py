@@ -41,6 +41,33 @@ class DiscordUrlResponse:
 
 
 @dataclass
+class WhoAmIResponse:
+    logged_in: bool = False
+    kind: str = ""
+    is_admin: bool = False
+    discord_id: str | None = None
+    discord_name: str | None = None
+    linked: bool = False
+    account_id: str | None = None
+    expires_at: int = 0
+
+
+@dataclass
+class LinkRequestResponse:
+    code: str = ""
+    expires_at: float = 0.0
+    instruction: str = ""
+
+
+@dataclass
+class RefreshResponse:
+    token: str = ""
+    kind: str = ""
+    is_admin: bool = False
+    expires_at: int = 0
+
+
+@dataclass
 class SeasonsListResponse:
     active_season: str = ""
     seasons: dict[str, SeasonSchema] = field(default_factory=dict)

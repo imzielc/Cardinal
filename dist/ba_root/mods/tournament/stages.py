@@ -365,7 +365,9 @@ def playable(stage: Stage) -> list[MatchSchema]:
         for round_data in bracket.values()
         if round_data.status == Status.IN_PROGRESS
         for match in round_data.matches.values()
-        if not match.is_bye and all(slot.name is not None for slot in match.teams)
+        if match.status != Status.COMPLETED
+        and not match.is_bye
+        and all(slot.name is not None for slot in match.teams)
     ]
     found.sort(
         key=lambda m: (

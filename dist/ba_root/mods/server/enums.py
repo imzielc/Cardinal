@@ -43,7 +43,6 @@ class Playlist(IntEnum):
 class TournamentStage(StrEnum):
     REGISTRATION = "REGISTRATION"
     IN_PROGRESS = "IN_PROGRESS"
-    PAUSED = "PAUSED"
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
 

@@ -55,11 +55,16 @@ async def season_info(request: web.Request) -> web.Response:
     season = tournament_storage.get_season(sid)
     if season is None:
         raise web.HTTPNotFound(reason="No such season.")
+    
     return web.json_response({
         **season.to_dict(),
         "season_id": sid,
         "is_active": sid == tournament_storage.active_season,
-        "registrations_open": tournament_storage.are_registrations_open,
+        "registrations_open": (
+            tournament_storage.are_registrations_open
+            if sid == tournament_storage.active_season
+            else False
+        ),
     })
 
 

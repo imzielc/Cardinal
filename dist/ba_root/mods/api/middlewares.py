@@ -9,21 +9,36 @@ from api.auth import is_master_token, verify_jwt
 from api.revoked import revoked
 
 
+def _normalize(payload: dict) -> dict:
+    """secret and master sessions are always admin, even in older JWTs
+    that predate the is_admin field."""
+    if payload.get("kind") in ("secret", "master"):
+        payload["is_admin"] = True
+    return payload
+
+
 def _authenticate(request: web.Request) -> dict | None:
     header = request.headers.get("Authorization", "")
     if header.startswith("Bearer "):
         token = header[7:].strip()
         if token and is_master_token(token):
-            return {"kind": "master", "sub": "master", "jti": ""}
+            return {
+                "kind": "master",
+                "sub": "master",
+                "jti": "",
+                "is_admin": True,
+                "discord_id": None,
+                "discord_name": None,
+            }
         if token:
             payload = verify_jwt(token)
             if payload and not revoked.is_revoked(payload.get("jti", "")):
-                return payload
+                return _normalize(payload)
     cookie = request.cookies.get("admin_session")
     if cookie:
         payload = verify_jwt(cookie)
         if payload and not revoked.is_revoked(payload.get("jti", "")):
-            return payload
+            return _normalize(payload)
     return None
 
 
