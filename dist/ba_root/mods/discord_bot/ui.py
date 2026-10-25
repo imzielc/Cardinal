@@ -8,8 +8,8 @@ import discord
 from discord import AllowedMentions, ButtonStyle, Guild, Interaction, Role, ui
 from discord.utils import get
 
-from server.enums import TeamStatus
-from tournament import tournament
+from server.enums import TeamStatus, TournamentStage
+from tournament import seasons
 from tournament.link import link
 from tournament.registration import Registration
 from tournament.waitlist import Waitlist
@@ -68,14 +68,14 @@ def _expiry_label(expires_at: float) -> str:
 
 async def refresh_register_panel(bot) -> None:
     """re-renders the tracked register panel to match the current state. silent on any failure."""
-    channel_id, message_id = tournament.get_panel()
+    channel_id, message_id = seasons.get_panel()
     if not channel_id or not message_id:
         return
 
     try:
         channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
     except discord.NotFound:
-        tournament.clear_panel()
+        seasons.clear_panel()
         return
     except discord.HTTPException:
         return
@@ -83,7 +83,7 @@ async def refresh_register_panel(bot) -> None:
     try:
         message = await channel.fetch_message(message_id)
     except discord.NotFound:
-        tournament.clear_panel()
+        seasons.clear_panel()
         return
     except discord.HTTPException:
         return
@@ -125,7 +125,7 @@ class ConfirmView(ui.View):
 
 def participant_role(guild: Guild, season_id: str) -> Role | None:
     """returns the participant role of the season."""
-    season = tournament.get_season(season_id)
+    season = seasons.get_season(season_id)
     if season and season.participant_role_id:
         role = guild.get_role(season.participant_role_id)
         if role:
@@ -252,11 +252,14 @@ async def create_team_thread(channel, team_name: str, season_id: str,
 class RegisterView(ui.LayoutView):
     """the persistent registration panel. rebuilt from state every time it is shown.
 
-    the button's label reflects the current state:
-      - no season:         disabled
-      - regs open:         "Register"
-      - regs closed:       "Join Waitlist"
-    the actual behavior is decided in the modal on submit, so a stale button
+    the button reflects the current stage:
+      - no season:      disabled
+      - REGISTRATION:   "Register"
+      - NONE:           "Join Waitlist"
+      - IN_PROGRESS:    disabled, "In Progress"
+      - COMPLETED:      disabled, "Completed"
+      - CANCELLED:      disabled, "Cancelled"
+    the actual behaviour is decided in the modal on submit, so a stale button
     can't produce a wrong outcome.
     """
 
@@ -267,12 +270,12 @@ class RegisterView(ui.LayoutView):
     def _build(self) -> None:
         self.clear_items()
 
-        season_id = tournament.active_season
-        season = tournament.get_season(season_id) if int(season_id) else None
-        regs_open = season is not None and tournament.are_registrations_open
+        season_id = seasons.active_season
+        season = seasons.get_season(season_id) if int(season_id) else None
+        regs_open = season is not None and season.stage == TournamentStage.REGISTRATION
 
         container = ui.Container(accent_color=discord.Color.blurple())
-        container.add_item(ui.TextDisplay("### 🏆  Tournament Registration"))
+        container.add_item(ui.TextDisplay("### Tournament Registration"))
 
         if season is None:
             container.add_item(
@@ -331,10 +334,10 @@ class RegisterView(ui.LayoutView):
                     emoji="<:register:1560371261459267654>",
                     custom_id=REGISTER_BUTTON_ID,
                 )
-            else:
+            elif season.stage == TournamentStage.NONE:
                 container.add_item(
                     ui.TextDisplay(
-                        "🔒 Registrations are closed. Click below to join the waitlist — "
+                        "Registrations are closed. Click below to join the waitlist — "
                         "if a slot opens up you'll be promoted automatically."
                     )
                 )
@@ -344,13 +347,37 @@ class RegisterView(ui.LayoutView):
                     emoji="<:register:1560371261459267654>",
                     custom_id=REGISTER_BUTTON_ID,
                 )
+            elif season.stage == TournamentStage.IN_PROGRESS:
+                container.add_item(ui.TextDisplay("The tournament is in progress."))
+                button = ui.Button(
+                    label="In Progress",
+                    style=ButtonStyle.secondary,
+                    custom_id=REGISTER_BUTTON_ID,
+                    disabled=True,
+                )
+            elif season.stage == TournamentStage.COMPLETED:
+                container.add_item(ui.TextDisplay("This season has completed."))
+                button = ui.Button(
+                    label="Completed",
+                    style=ButtonStyle.secondary,
+                    custom_id=REGISTER_BUTTON_ID,
+                    disabled=True,
+                )
+            else:  # CANCELLED
+                container.add_item(ui.TextDisplay("This season was cancelled."))
+                button = ui.Button(
+                    label="Cancelled",
+                    style=ButtonStyle.secondary,
+                    custom_id=REGISTER_BUTTON_ID,
+                    disabled=True,
+                )
             button.callback = self.register_btn
 
         container.add_item(ui.ActionRow(button))
         self.add_item(container)
 
     async def register_btn(self, interaction: Interaction) -> None:
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             await interaction.response.send_message(
                 "There is no tournament ongoing right now.", ephemeral=True
@@ -363,7 +390,7 @@ class RegisterView(ui.LayoutView):
             )
             return
 
-        season_data = tournament.get_season(season_id=season_id)
+        season_data = seasons.get_season(season_id=season_id)
         size = season_data.type.count
         if size > 1:
             await interaction.response.send_modal(
@@ -443,6 +470,16 @@ class SoloRegistrationModal(ui.Modal, title="Tournament Solo Registration."):
     async def on_submit(self, interaction: Interaction):
         registration = Registration(self.season_id)
 
+        season_data = seasons.get_season(self.season_id)
+        if season_data is None or season_data.stage not in (
+            TournamentStage.NONE,
+            TournamentStage.REGISTRATION,
+        ):
+            await interaction.response.send_message(
+                "This season is no longer accepting registrations.", ephemeral=True
+            )
+            return
+
         if not link.is_linked(str(interaction.user.id)):
             await interaction.response.send_message(
                 "Link your game account first with `/account link`.", ephemeral=True
@@ -462,7 +499,7 @@ class SoloRegistrationModal(ui.Modal, title="Tournament Solo Registration."):
             return
 
         # state decides: open -> register, closed -> waitlist.
-        if not tournament.are_registrations_open:
+        if season_data.stage == TournamentStage.NONE:
             wl = Waitlist(self.season_id)
             if wl.is_waitlisted(str(interaction.user.id)):
                 await interaction.response.send_message(
@@ -536,6 +573,16 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
     async def on_submit(self, interaction: Interaction):
         registration = Registration(self.season_id)
 
+        season_data = seasons.get_season(self.season_id)
+        if season_data is None or season_data.stage not in (
+            TournamentStage.NONE,
+            TournamentStage.REGISTRATION,
+        ):
+            await interaction.response.send_message(
+                "This season is no longer accepting registrations.", ephemeral=True
+            )
+            return
+
         if not link.is_linked(str(interaction.user.id)):
             await interaction.response.send_message(
                 "Link your game account first with `/account link`.", ephemeral=True
@@ -579,7 +626,8 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
         if unlinked:
             names = ", ".join(m.mention for m in unlinked)
             await interaction.response.send_message(
-                f"These players haven't linked yet: {names}.\nAsk them to run `/account link` and `/link <code>` in-game first.",
+                f"These players haven't linked yet: {names}.\n"
+                f"Ask them to run `/account link` and `/link <code>` in-game first.",
                 ephemeral=True,
             )
             return
@@ -587,7 +635,7 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
         invited_ids = [str(m.id) for m in invited_members]
 
         # state decides: open -> register, closed -> waitlist.
-        if not tournament.are_registrations_open:
+        if season_data.stage == TournamentStage.NONE:
             wl = Waitlist(self.season_id)
             if wl.is_waitlisted(str(interaction.user.id)):
                 await interaction.response.send_message(
@@ -701,14 +749,14 @@ class TeamInvitationView(ui.LayoutView):
     def _build(self, team=None) -> None:
         self.clear_items()
 
-        season_id = self.season_id or tournament.active_season
+        season_id = self.season_id or seasons.active_season
         if team is None and int(season_id or "0"):
             try:
                 team = Registration(season_id=season_id).get_team(self.team_id)
             except Exception:
                 team = None
 
-        season = tournament.get_season(season_id) if int(season_id or "0") else None
+        season = seasons.get_season(season_id) if int(season_id or "0") else None
         size = season.type.count if season else 0
 
         if team is None:
@@ -837,7 +885,7 @@ class TeamInvitationView(ui.LayoutView):
             pass
 
     async def accept_btn(self, interaction: Interaction) -> None:
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         registration = Registration(season_id=season_id)
         db = registration.read()
         user_team_id = db.players.get(str(interaction.user.id))
@@ -900,7 +948,7 @@ class TeamInvitationView(ui.LayoutView):
         await self._edit_interaction_message(interaction)
 
     async def decline_btn(self, interaction: Interaction) -> None:
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         registration = Registration(season_id=season_id)
         db = registration.read()
         user_team_id = db.players.get(str(interaction.user.id))

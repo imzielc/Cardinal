@@ -25,7 +25,7 @@ class BaseSchema:
         return TypeAdapter(cls).validate_python(data)
 
     def to_dict(self) -> dict:
-        """serializes the schmea back into a dict."""
+        """serializes the schema back into a dict."""
         return asdict(self)
 
 
@@ -36,17 +36,17 @@ class SeasonSchema(BaseSchema):
     series: SeriesType = SeriesType.BO3
     type: TournamentType = TournamentType.SOLO
     mode: TournamentMode = TournamentMode.SINGLE
-    stage: TournamentStage = TournamentStage.REGISTRATION
+    stage: TournamentStage = TournamentStage.NONE
     created_at: str = ""
+    completed_at: str = ""
     participant_role_id: int = 0
 
 
 @dataclass
-class TournamentSchema(BaseSchema):
-    """Schema for all the seasons."""
+class SeasonsSchema(BaseSchema):
+    """schema for all the seasons."""
 
     active_season: str = "0"
-    registrations_status: bool = False
     seasons: dict[str, SeasonSchema] = field(default_factory=dict)
     panel_channel_id: int = 0
     panel_message_id: int = 0
@@ -59,7 +59,6 @@ class MatchTeamSchema(BaseSchema):
     name: str | None = None
     score: int = 0
     series: int = 0
-    # a slot can be filled by another match's winner or loser: "W:<bracket>:<round>:<match>" / "L:...".
     source: str | None = None
     bye: bool = False
 
@@ -74,11 +73,9 @@ class MatchSchema(BaseSchema):
     loser_idx: int | None = None
     group_id: str | None = None
     round_id: str | None = None
-    last_scores: list[int] = field(default_factory=lambda : [0, 0])
-    # "winners", "losers" or "grand-final" in double elimination.
+    last_scores: list[int] = field(default_factory=lambda: [0, 0])
     bracket: str | None = None
     is_bye: bool = False
-    # optional display name. overrides the derived label when set.
     label: str = ""
 
 
@@ -115,11 +112,13 @@ class GroupStageSchema(BaseSchema):
     winning_teams_per_group: int = 0
     status: Status = Status.PENDING
 
+
 @dataclass
 class PlacementSchema(BaseSchema):
     """final rank of a team in a completed bracket."""
     rank: int = 0
     team: str = ""
+
 
 @dataclass
 class BracketsMetaSchema(BaseSchema):
@@ -130,7 +129,6 @@ class BracketsMetaSchema(BaseSchema):
     total_rounds: int = 0
     status: Status = Status.PENDING
     placements: list[PlacementSchema] = field(default_factory=list)
-    # set when a round transition is waiting for its release window.
     pending_round_start: list[dict] = field(default_factory=list)
 
 
@@ -144,11 +142,11 @@ class MemberSchema(BaseSchema):
     invited_at: float = 0.0
 
     def to_public(self) -> dict:
-        """ masks the uuid and returns the dict. """
         data = self.to_dict()
-        uuid = data["device_uuid"]
-        if uuid:
+        if data["device_uuid"]:
             data["device_uuid"] = "***"
+        if data["account_id"]:
+            data["account_id"] = "***"
         return data
 
 
@@ -162,14 +160,12 @@ class TeamSchema(BaseSchema):
     thread_id: int = 0
     invitation_message_id: int = 0
     expires_at: float = 0.0
-    # discord_id -> unix time of decline. cools down re-invites.
     declined: dict[str, float] = field(default_factory=dict)
     role_id: int = 0
     reminders_sent: int = 0
     last_reminded_at: float = 0.0
 
     def to_public(self) -> dict:
-        """masks sensitive member fields and returns the dict."""
         data = self.to_dict()
         data["members"] = [m.to_public() for m in self.members]
         return data
@@ -179,7 +175,6 @@ class TeamSchema(BaseSchema):
 class RegistrationSchema(BaseSchema):
     """schema for the registration."""
     teams: dict[str, TeamSchema] = field(default_factory=dict)
-    # keys can be a discord id or a game account id.
     players: dict[str, str] = field(default_factory=dict)
 
 
@@ -217,6 +212,7 @@ class WaitlistEntrySchema(BaseSchema):
 class WaitlistSchema(BaseSchema):
     """queued teams for a season, oldest first."""
     entries: list[WaitlistEntrySchema] = field(default_factory=list)
+
 
 @dataclass
 class PlayerStatsSchema(BaseSchema):

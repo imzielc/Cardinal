@@ -22,7 +22,7 @@ from discord_bot.ui import (
     refresh_register_panel,
 )
 from server import config
-from tournament import tournament
+from tournament import seasons
 from tournament.match_threads import match_threads
 from tournament.registration import Registration
 
@@ -180,7 +180,7 @@ async def cleanup_expired_team(bot: commands.Bot, team, season) -> None:
 async def cleanup_expired_teams(bot: commands.Bot, season_id: str) -> list:
     """expires every team past its deadline, cleans up, promotes waitlist."""
     registration = Registration(season_id=season_id)
-    season = tournament.get_season(season_id)
+    season = seasons.get_season(season_id)
     removed = []
     for candidate in registration.expired_teams():
         team = registration.expire_team(candidate.id)
@@ -201,7 +201,7 @@ async def cleanup_expired_teams(bot: commands.Bot, season_id: str) -> list:
 async def cleanup_season(bot: commands.Bot, season_id: str) -> None:
     """deletes every discord trace of a season: roles, threads, match threads."""
     try:
-        season = tournament.get_season(season_id)
+        season = seasons.get_season(season_id)
     except Exception:
         season = None
     if season:
@@ -244,7 +244,7 @@ async def announce_waitlist_promotion(bot: commands.Bot, season_id: str, info: d
     if not team:
         return
 
-    season = tournament.get_season(season_id)
+    season = seasons.get_season(season_id)
     if not season:
         return
 
@@ -277,7 +277,7 @@ async def announce_waitlist_promotion(bot: commands.Bot, season_id: str, info: d
     if team_role_id:
         registration.set_role(team_id, team_role_id)
 
-    channel_id, _ = tournament.get_panel()
+    channel_id, _ = seasons.get_panel()
     if not channel_id:
         return
     try:
@@ -349,7 +349,7 @@ def _match_header(payload_match: dict) -> str:
             s = standings.get(name)
             if s:
                 lines.append(
-                    f"{name} · {s['wins']}W-{s['loses']}L · {s['points']} pts · "
+                    f"{name} · {s['wins']}W-{s.get('losses', s.get('loses', 0))}L · {s['points']} pts · "
                     f"{'+' if s['diff'] >= 0 else ''}{s['diff']} diff"
                 )
             else:

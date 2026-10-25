@@ -9,7 +9,7 @@ import discord
 from discord.ext import commands, tasks
 
 from discord_bot.client import GameClient
-from tournament import tournament
+from tournament import seasons
 from tournament.brackets import Brackets
 
 # rounds only release when the current IST hour is in [0, 8).
@@ -41,7 +41,7 @@ class RoundScheduler(commands.Cog):
 
     @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
     async def watch(self) -> None:
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             return
         if not _in_window():

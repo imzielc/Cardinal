@@ -2,7 +2,7 @@
 
 from aiohttp import web
 
-from tournament import tournament as tournament_storage
+from tournament import seasons
 from tournament.brackets import Brackets
 from tournament.link import link as link_storage
 from tournament.registration import Registration
@@ -22,7 +22,7 @@ def _actor(request: web.Request) -> str:
 
 def _resolve(season_id: str) -> str:
     if season_id == "active":
-        sid = tournament_storage.active_season
+        sid = seasons.active_season
         if not int(sid):
             raise web.HTTPNotFound(reason="No active season.")
         return sid

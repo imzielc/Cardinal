@@ -761,7 +761,7 @@ def _generate_single_group_standings(
     col_rank = card_x + 35
     col_team = card_x + 130
     col_wins = card_x + 900
-    col_loses = card_x + 1050
+    col_losses = card_x + 1050
     col_pts = card_x + 1200
     col_diff = card_x + 1340
     col_rounds = card_x + 1500
@@ -770,7 +770,7 @@ def _generate_single_group_standings(
     d.text((col_rank, header_y + 18), "#", font=header_font, fill=CYAN)
     d.text((col_team, header_y + 18), "TEAM", font=header_font, fill=CYAN)
     d.text((col_wins, header_y + 18), "WINS", font=header_font, fill=CYAN)
-    d.text((col_loses, header_y + 18), "LOSSES", font=header_font, fill=CYAN)
+    d.text((col_losses, header_y + 18), "LOSSES", font=header_font, fill=CYAN)
     d.text((col_pts, header_y + 18), "POINTS", font=header_font, fill=CYAN)
     d.text((col_diff, header_y + 18), "ROUND DIFF", font=header_font, fill=CYAN)
     d.text(
@@ -815,13 +815,13 @@ def _generate_single_group_standings(
         d.text((col_team, text_y), safe_team_name, font=fitted_font, fill=WHITE)
 
         wins = str(team_data.get("wins", 0))
-        loses = str(team_data.get("loses", 0))
+        losses = str(team_data.get("losses", team_data.get("loses", 0)))
         pts = str(team_data.get("points", 0))
         diff = str(team_data.get("diff", 0))
         rd_str = f"{team_data.get('rounds_won', 0)}/{team_data.get('rounds_lost', 0)}"
 
         d.text((col_wins + 2, text_y + 2), wins, font=num_font, fill=WHITE)
-        d.text((col_loses + 2, text_y + 2), loses, font=num_font, fill=WHITE)
+        d.text((col_losses + 2, text_y + 2), losses, font=num_font, fill=WHITE)
         d.text((col_pts + 2, text_y + 2), pts, font=row_font, fill=CYAN)
         d.text((col_diff + 2, text_y + 2), diff, font=num_font, fill=WHITE)
         d.text((col_rounds + 2, text_y + 2), rd_str, font=num_font, fill=MUTED_BOARD)

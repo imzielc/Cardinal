@@ -391,16 +391,50 @@ def outcome(stage: Stage, mode: TournamentMode) -> tuple[bool, list[PlacementSch
             return False, []
         return True, _double_placements(stage, decider)
 
-    finals = sorted_rounds(stage[MAIN_STAGE])[-1][1]
+    rounds = sorted_rounds(stage[MAIN_STAGE])
+    if not rounds:
+        return False, []
+    finals = rounds[-1][1]
     if finals.status != Status.COMPLETED:
         return False, []
+    return True, _single_placements(rounds)
+
+
+def _single_placements(rounds: list[tuple[str, RoundSchema]]) -> list[PlacementSchema]:
+    """full final placements for a completed single-elimination bracket.
+
+    winner = 1, runner-up = 2, 3rd-place winner = 3, loser = 4, then every
+    earlier round's losers share a rank, walked from the round before the
+    semifinals backwards. the semifinal losers are already ranked via the
+    3rd-place match, so they are skipped here.
+    """
     placements = []
-    for match_id, rank in (("1", 1), ("2", 3)):
-        match = finals.matches.get(match_id)
-        if match:
-            placements.append(PlacementSchema(rank=rank, team=match.teams[match.winner_idx].name))
-            placements.append(PlacementSchema(rank=rank + 1, team=match.teams[match.loser_idx].name))
-    return True, placements
+    finals = rounds[-1][1]
+
+    final_match = finals.matches.get("1")
+    if final_match and final_match.status == Status.COMPLETED:
+        placements.append(PlacementSchema(rank=1, team=final_match.teams[final_match.winner_idx].name))
+        placements.append(PlacementSchema(rank=2, team=final_match.teams[final_match.loser_idx].name))
+
+    third_match = finals.matches.get("2")
+    if third_match and third_match.status == Status.COMPLETED:
+        placements.append(PlacementSchema(rank=3, team=third_match.teams[third_match.winner_idx].name))
+        placements.append(PlacementSchema(rank=4, team=third_match.teams[third_match.loser_idx].name))
+
+    next_rank = 5
+    for i in range(len(rounds) - 3, -1, -1):
+        round_data = rounds[i][1]
+        losers = []
+        for match in round_data.matches.values():
+            if match.status == Status.COMPLETED and not match.is_bye and match.loser_idx is not None:
+                loser = match.teams[match.loser_idx]
+                if loser.name:
+                    losers.append(loser.name)
+        for team_name in losers:
+            placements.append(PlacementSchema(rank=next_rank, team=team_name))
+        next_rank += len(losers)
+
+    return placements
 
 
 def _double_placements(stage: Stage, decider: MatchSchema) -> list[PlacementSchema]:

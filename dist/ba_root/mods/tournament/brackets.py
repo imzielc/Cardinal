@@ -97,7 +97,7 @@ class Brackets(Storage):
                             s = stats[name]
                             entry["standings"][name] = {
                                 "wins": s.get("wins", 0),
-                                "loses": s.get("loses", 0),
+                                "losses": s.get("losses", s.get("loses", 0)),
                                 "points": s.get("points", 0),
                                 "diff": s.get("diff", 0),
                             }
@@ -426,7 +426,7 @@ class Brackets(Storage):
                         stats[team_name] = {
                             "id": team_name,
                             "wins": 0,
-                            "loses": 0,
+                            "losses": 0,
                             "points": 0,
                             "diff": 0,
                             "rounds_won": 0,
@@ -453,14 +453,14 @@ class Brackets(Storage):
 
                 if match.winner_idx == team1.idx:
                     stats[t1]["wins"] += 1
-                    stats[t2]["loses"] += 1
+                    stats[t2]["losses"] += 1
                 else:
-                    stats[t1]["loses"] += 1
+                    stats[t1]["losses"] += 1
                     stats[t2]["wins"] += 1
 
         for team in stats.values():
             team["diff"] = team["rounds_won"] - team["rounds_lost"]
-            team["points"] = team["wins"] * 3 - team["loses"]
+            team["points"] = team["wins"] * 3 - team["losses"]
 
         sorted_teams = sorted(
             stats.values(),
@@ -519,21 +519,23 @@ class Brackets(Storage):
 
     def announce_tournament_completion(self) -> None:
         """announces the tournament completion."""
-        from tournament import tournament
+        from datetime import datetime, timezone
+        from tournament import seasons
 
-        db = tournament.read()
+        db = seasons.read()
         season = db.seasons.get(self.season_id)
         if season:
             season.stage = TournamentStage.COMPLETED
+            season.completed_at = datetime.now(timezone.utc).isoformat()
         db.active_season = "0"
-        tournament.commit(db)
+        seasons.commit(db)
 
         send_event("tournament_completed", season_id=self.season_id)
 
     def announce_match_start(self, match: MatchSchema) -> None:
         """announces the match start in discord."""
-        from tournament import tournament
-        season = tournament.get_season(self.season_id)
+        from tournament import seasons
+        season = seasons.get_season(self.season_id)
         send_event(
             "match_announcement",
             season_id=self.season_id,
@@ -643,9 +645,9 @@ class Brackets(Storage):
             return False, "Match is already completed", match
 
         team_index -= 1
-        from tournament import tournament
+        from tournament import seasons
 
-        series_length = tournament.series_length
+        series_length = seasons.series_length
         match.winner_idx = team_index
         match.loser_idx = 1 - team_index
 

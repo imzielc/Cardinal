@@ -7,7 +7,7 @@ from discord.ext import commands, tasks
 
 from discord_bot.events import cleanup_expired_teams
 from discord_bot.ui import _expiry_label
-from tournament import tournament
+from tournament import seasons
 from tournament.registration import Registration
 
 
@@ -25,7 +25,7 @@ class TeamInvitationWatcher(commands.Cog):
 
     @tasks.loop(minutes=5)
     async def watch(self) -> None:
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             return
         try:
@@ -41,7 +41,7 @@ class TeamInvitationWatcher(commands.Cog):
             # 2. remind any team that is still pending verification.
             #    we re-read each team by id inside the loop (via get_team),
             #    so a verify that happens while an earlier reminder is being
-            #    awaited is picked up on the very next iteration. this closes
+            #    awaited is picked up on the very next iteration. this closses
             #    the race where a snapshot taken at loop start would still
             #    show a just-verified team as pending.
             registration = Registration(season_id=season_id)

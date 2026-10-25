@@ -5,7 +5,8 @@ from pathlib import Path
 
 from aiohttp import web
 
-from tournament import tournament as tournament_storage
+from server.enums import TournamentStage
+from tournament import seasons as seasons_storage
 from tournament.brackets import Brackets
 from tournament.registration import Registration
 from tournament.schema import (
@@ -19,7 +20,12 @@ from tournament.schema import (
 from tournament.storage import SEASONS_DIR
 from tournament.waitlist import Waitlist
 from api.registry import route
-from api.schema import RoundsResponse, SeasonsListResponse, SeasonInfoResponse
+from api.schema import (
+    HallOfFameResponse,
+    RoundsResponse,
+    SeasonsListResponse,
+    SeasonInfoResponse,
+)
 
 
 def _read_json(path: Path) -> dict:
@@ -31,20 +37,56 @@ def _read_json(path: Path) -> dict:
 
 def _resolve(season_id: str) -> str:
     if season_id == "active":
-        sid = tournament_storage.active_season
+        sid = seasons_storage.active_season
         if not int(sid):
             raise web.HTTPNotFound(reason="No active season.")
         return sid
     return season_id
 
 
-@route("GET", "/v1/seasons", response=SeasonsListResponse)
+def _season_aggregates(season_id: str, season) -> dict:
+    """team count and champion for a season."""
+    try:
+        team_count = len(Registration(season_id).read().teams)
+    except Exception:
+        team_count = 0
+
+    champion = None
+    if season.stage == TournamentStage.COMPLETED:
+        try:
+            meta = Brackets(season_id).read_meta()
+            if meta.placements:
+                champion = meta.placements[0].team
+        except Exception:
+            pass
+
+    return {"team_count": team_count, "champion": champion}
+
+
+@route(
+    "GET",
+    "/v1/seasons",
+    response=SeasonsListResponse,
+    query={"status": "string", "mode": "string"},
+)
 async def list_seasons(request: web.Request) -> web.Response:
-    """All seasons, plus which one is active."""
-    db = tournament_storage.read()
+    """All seasons, plus which one is active. Filters: ?status=, ?mode=."""
+    status_filter = request.query.get("status", "").upper()
+    mode_filter = request.query.get("mode", "").upper()
+
+    db = seasons_storage.read()
+    out = {}
+    for sid, season in db.seasons.items():
+        if status_filter and season.stage.value != status_filter:
+            continue
+        if mode_filter and season.mode.value != mode_filter:
+            continue
+        aggregates = _season_aggregates(sid, season)
+        out[sid] = {**season.to_dict(), **aggregates}
+
     return web.json_response({
         "active_season": db.active_season,
-        "seasons": {sid: sch.to_dict() for sid, sch in db.seasons.items()},
+        "seasons": out,
     })
 
 
@@ -52,20 +94,76 @@ async def list_seasons(request: web.Request) -> web.Response:
 async def season_info(request: web.Request) -> web.Response:
     """One season's info. Use 'active' for the running one."""
     sid = _resolve(request.match_info["season_id"])
-    season = tournament_storage.get_season(sid)
+    season = seasons_storage.get_season(sid)
     if season is None:
         raise web.HTTPNotFound(reason="No such season.")
-    
+
+    aggregates = _season_aggregates(sid, season)
+
+    placements = None
+    if season.stage == TournamentStage.COMPLETED:
+        try:
+            meta = Brackets(sid).read_meta()
+            placements = [p.to_dict() for p in meta.placements]
+        except Exception:
+            pass
+
+    regs_open = (
+        season.stage == TournamentStage.REGISTRATION
+        if sid == seasons_storage.active_season
+        else False
+    )
+
     return web.json_response({
         **season.to_dict(),
+        **aggregates,
         "season_id": sid,
-        "is_active": sid == tournament_storage.active_season,
-        "registrations_open": (
-            tournament_storage.are_registrations_open
-            if sid == tournament_storage.active_season
-            else False
-        ),
+        "is_active": sid == seasons_storage.active_season,
+        "registrations_open": regs_open,
+        "placements": placements,
     })
+
+
+@route(
+    "GET",
+    "/v1/hall-of-fame",
+    response=HallOfFameResponse,
+    query={"type": "string", "mode": "string"},
+)
+async def hall_of_fame(request: web.Request) -> web.Response:
+    """Completed seasons with their final placements, newest first."""
+    type_filter = request.query.get("type", "").upper()
+    mode_filter = request.query.get("mode", "").upper()
+
+    db = seasons_storage.read()
+    entries = []
+    for sid in sorted(db.seasons.keys(), key=int, reverse=True):
+        season = db.seasons[sid]
+        if season.stage != TournamentStage.COMPLETED:
+            continue
+        if type_filter and season.type.value != type_filter:
+            continue
+        if mode_filter and season.mode.value != mode_filter:
+            continue
+
+        placements = []
+        try:
+            meta = Brackets(sid).read_meta()
+            placements = [p.to_dict() for p in meta.placements]
+        except Exception:
+            pass
+
+        entries.append({
+            "season_id": sid,
+            "type": season.type.value,
+            "mode": season.mode.value,
+            "series": season.series.value,
+            "created_at": season.created_at,
+            "completed_at": season.completed_at,
+            "placements": placements,
+        })
+
+    return web.json_response({"entries": entries})
 
 
 @route(

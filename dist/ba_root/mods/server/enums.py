@@ -41,6 +41,9 @@ class Playlist(IntEnum):
 
 
 class TournamentStage(StrEnum):
+    """enum class for tournament stages."""
+
+    NONE = "NONE"
     REGISTRATION = "REGISTRATION"
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"

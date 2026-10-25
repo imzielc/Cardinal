@@ -2,7 +2,13 @@
 
 from dataclasses import dataclass, field
 
-from tournament.schema import MatchSchema, RoundSchema, SeasonSchema
+from server.enums import SeriesType, TournamentMode, TournamentType
+from tournament.schema import (
+    MatchSchema,
+    PlacementSchema,
+    RoundSchema,
+    SeasonSchema,
+)
 
 
 @dataclass
@@ -68,9 +74,16 @@ class RefreshResponse:
 
 
 @dataclass
+class SeasonListItemSchema(SeasonSchema):
+    """a season in the list response, with aggregations."""
+    team_count: int = 0
+    champion: str | None = None
+
+
+@dataclass
 class SeasonsListResponse:
     active_season: str = ""
-    seasons: dict[str, SeasonSchema] = field(default_factory=dict)
+    seasons: dict[str, SeasonListItemSchema] = field(default_factory=dict)
 
 
 @dataclass
@@ -78,6 +91,25 @@ class SeasonInfoResponse(SeasonSchema):
     season_id: str = ""
     is_active: bool = False
     registrations_open: bool = False
+    team_count: int = 0
+    champion: str | None = None
+    placements: list[PlacementSchema] | None = None
+
+
+@dataclass
+class HallOfFameEntry:
+    season_id: str = ""
+    type: TournamentType = TournamentType.SOLO
+    mode: TournamentMode = TournamentMode.SINGLE
+    series: SeriesType = SeriesType.BO3
+    created_at: str = ""
+    completed_at: str = ""
+    placements: list[PlacementSchema] = field(default_factory=list)
+
+
+@dataclass
+class HallOfFameResponse:
+    entries: list[HallOfFameEntry] = field(default_factory=list)
 
 
 @dataclass

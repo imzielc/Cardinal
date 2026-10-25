@@ -151,9 +151,9 @@ class Load(babase.Plugin):
         stats.stats.bootstrap()
 
         # the tournament manager.
-        if int(tournament.tournament.active_season) > 0:
+        if int(tournament.seasons.active_season) > 0:
             from tournament import manager
-            manager.manager.initialize(season_id=tournament.tournament.active_season)
+            manager.manager.initialize(season_id=tournament.seasons.active_season)
 
         # load commands.
         commands.load()

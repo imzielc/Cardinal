@@ -31,7 +31,7 @@ from server.enums import (
     TournamentStage,
     TournamentType,
 )
-from tournament import posts, tournament
+from tournament import posts, seasons
 from tournament.brackets import round_label
 from tournament.link import link
 from tournament.registration import Registration
@@ -71,7 +71,7 @@ class TournamentCommands(
         mode: TournamentMode = TournamentMode.SINGLE,
     ) -> None:
         """creates a tournament season"""
-        if int(tournament.active_season):
+        if int(seasons.active_season):
             await interaction.response.send_message(
                 "Cannot create! a season is going on."
             )
@@ -87,9 +87,11 @@ class TournamentCommands(
             mode=mode,
             created_at=datetime.now(ist).isoformat(),
         )
-        tournament.create_season(schema=schema)
+        seasons.create_season(schema=schema)
         await interaction.response.send_message(
-            f"The {type.lower()} season has been created with series: {series.lower()}, mode: {mode.lower().replace('_', ' ')}"
+            f"The {type.lower()} season has been created with series: {series.lower()}, "
+            f"mode: {mode.lower().replace('_', ' ')}.\n"
+            f"Run `/tournament registrations open` to start accepting signups."
         )
         role = discord.utils.get(interaction.guild.roles, name="Participant")
         if role:
@@ -97,9 +99,9 @@ class TournamentCommands(
         role = await interaction.guild.create_role(
             name="Participant", mentionable=True,
         )
-        season = tournament.get_season(season_id=tournament.active_season)
+        season = seasons.get_season(season_id=seasons.active_season)
         season.participant_role_id = role.id
-        tournament.update_season(season_id=tournament.active_season, season=season)
+        seasons.update_season(season_id=seasons.active_season, season=season)
 
         await refresh_register_panel(self.bot)
 
@@ -109,7 +111,7 @@ class TournamentCommands(
         """posts the registration panel here (cleans up the previous one)."""
         await interaction.response.defer(ephemeral=True)
 
-        old_channel_id, old_message_id = tournament.get_panel()
+        old_channel_id, old_message_id = seasons.get_panel()
         if old_channel_id and old_message_id:
             try:
                 old_channel = self.bot.get_channel(old_channel_id) or await self.bot.fetch_channel(old_channel_id)
@@ -119,24 +121,24 @@ class TournamentCommands(
                 pass
 
         message = await interaction.channel.send(view=RegisterView())
-        tournament.set_panel(interaction.channel.id, message.id)
+        seasons.set_panel(interaction.channel.id, message.id)
         await interaction.followup.send("Registration panel posted.", ephemeral=True)
 
     @app_commands.command(name="cancel")
     @require(Authority.LEADER)
     async def cancel_tournament(self, interaction: Interaction) -> None:
         """cancels the active tournament"""
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             await interaction.response.send_message(
                 "There is no tournament season opened currently.", ephemeral=True
             )
             return
 
-        season = tournament.get_season(season_id)
+        season = seasons.get_season(season_id)
 
         async def confirmed(confirm_interaction: Interaction) -> None:
-            if tournament.active_season != season_id:
+            if seasons.active_season != season_id:
                 await confirm_interaction.response.edit_message(
                     content="That tournament was already cancelled.", view=None
                 )
@@ -147,7 +149,7 @@ class TournamentCommands(
 
             await cleanup_season(self.bot, season_id)
 
-            tournament.cancel_season(season_id)
+            seasons.cancel_season(season_id)
             cancelled = await asyncio.to_thread(posts.cancel_season, season_id)
             staff = self.bot.get_cog("HeldPosts")
             if staff:
@@ -181,7 +183,7 @@ class TournamentCommands(
     @app_commands.describe(user="The user to invite to your team.")
     async def invite_member(self, interaction: Interaction, user: discord.Member) -> None:
         """invites a new member to your team (captain only)."""
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             await interaction.response.send_message(
                 "There is no tournament ongoing.", ephemeral=True
@@ -246,7 +248,7 @@ class TournamentCommands(
             )
             return
 
-        season = tournament.get_season(season_id)
+        season = seasons.get_season(season_id)
         if season and len(team.members) >= season.type.count:
             await interaction.response.send_message(
                 "Your team is already full.", ephemeral=True
@@ -299,7 +301,7 @@ class TournamentCommands(
     @app_commands.command(name="leave")
     async def leave_team(self, interaction: Interaction) -> None:
         """leaves your team. if you're the captain, the whole team is dissolved."""
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             await interaction.response.send_message(
                 "There is no tournament ongoing.", ephemeral=True
@@ -314,8 +316,142 @@ class TournamentCommands(
             )
             return
 
-        season = tournament.get_season(season_id)
-        if season and season.stage != TournamentStage.REGISTRATION:
+        season = seasons.get_season(season_id)
+        if season and season.stage not in (
+            TournamentStage.NONE,
+            TournamentStage.REGISTRATION,
+        ):
+            await interaction.response.send_message(
+                "The tournament has already started, you can't leave now.",
+                ephemeral=True,
+            )
+            return
+
+        is_captain = team.captain == str(interaction.user.id)
+        if is_captain:
+            prompt = (
+                f"You're the captain of **{team.id}**. Leaving will dissolve the whole "
+                f"team and remove every member. Are you sure?"
+            )
+        else:
+            prompt = f"Leave **{team.id}**?"
+
+        async def confirmed(confirm_interaction: Interaction) -> None:
+            current = Registration(season_id=season_id).get_team(team.id)
+            if not current:
+                await confirm_interaction.response.edit_message(
+                    content="That team is no longer there.", view=None
+                )
+                return
+
+            await confirm_interaction.response.edit_message(
+                content="Working...", view=None
+            )
+
+            role = participant_role(interaction.guild, season_id)
+            thread = await self._get_thread(current.thread_id)
+
+            if is_captain:
+                members = list(current.members)
+                Registration(season_id=season_id).delete(team.id)
+
+                for member in members:
+                    try:
+                        user = interaction.guild.get_member(int(member.discord_id))
+                    except (TypeError, ValueError):
+                        continue
+                    if user is None:
+                        continue
+                    if role and role in user.roles:
+                        try:
+                            await user.remove_roles(role)
+                        except discord.HTTPException:
+                            pass
+
+                if current.role_id:
+                    try:
+                        team_role = interaction.guild.get_role(current.role_id)
+                        if team_role:
+                            await team_role.delete()
+                    except discord.HTTPException:
+                        pass
+
+                if thread is not None:
+                    try:
+                        await thread.send(
+                            f"**{team.id}** was dissolved by the captain."
+                        )
+                        await thread.edit(archived=True, locked=True)
+                    except discord.HTTPException:
+                        pass
+
+                await confirm_interaction.followup.send(
+                    f"Team **{team.id}** dissolved.", ephemeral=True
+                )
+
+                await promote_waitlist_one(self.bot, season_id)
+            else:
+                updated = Registration(season_id=season_id).leave(
+                    str(interaction.user.id)
+                )
+
+                if role and role in interaction.user.roles:
+                    try:
+                        await interaction.user.remove_roles(role)
+                    except discord.HTTPException:
+                        pass
+
+                if current.role_id:
+                    try:
+                        team_role = interaction.guild.get_role(current.role_id)
+                        if team_role and team_role in interaction.user.roles:
+                            await interaction.user.remove_roles(team_role)
+                    except discord.HTTPException:
+                        pass
+
+                if thread is not None and updated is not None:
+                    try:
+                        await thread.send(
+                            f"<@{updated.captain}> {interaction.user.mention} left the team."
+                        )
+                    except discord.HTTPException:
+                        pass
+
+                await confirm_interaction.followup.send(
+                    f"You left **{team.id}**.", ephemeral=True
+                )
+
+            await refresh_register_panel(self.bot)
+
+        view = ConfirmView(
+            interaction.user.id,
+            confirmed,
+            confirm_label="Yes, leave",
+            abort_text="You're still on the team.",
+        )
+        await interaction.response.send_message(prompt, view=view, ephemeral=True)    @app_commands.command(name="leave")
+    async def leave_team(self, interaction: Interaction) -> None:
+        """leaves your team. if you're the captain, the whole team is dissolved."""
+        season_id = seasons.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing.", ephemeral=True
+            )
+            return
+
+        registration = Registration(season_id=season_id)
+        team = registration.team_of(str(interaction.user.id))
+        if not team:
+            await interaction.response.send_message(
+                "You're not on a team.", ephemeral=True
+            )
+            return
+
+        season = seasons.get_season(season_id)
+        if season and season.stage not in (
+            TournamentStage.NONE,
+            TournamentStage.REGISTRATION,
+        ):
             await interaction.response.send_message(
                 "The tournament has already started, you can't leave now.",
                 ephemeral=True,
@@ -431,7 +567,7 @@ class TournamentCommands(
     @require(Authority.LEADER)
     async def extend_expiry(self, interaction: Interaction, hours: int) -> None:
         """extends the invitation expiry for the season and every team. leader only."""
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             await interaction.response.send_message(
                 "There is no tournament season opened currently.", ephemeral=True
@@ -483,7 +619,7 @@ class TournamentCommands(
     @require(Authority.LEADER)
     async def release_round(self, interaction: Interaction) -> None:
         """releases a pending round start immediately, bypassing the night window."""
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             await interaction.response.send_message(
                 "There is no tournament season opened currently.", ephemeral=True
@@ -527,28 +663,38 @@ class TournamentCommands(
     @require(Authority.LEADER)
     async def registrations(self, interaction: Interaction, option: bool) -> None:
         """open/close the registrations"""
-        if not int(tournament.active_season):
+        if not int(seasons.active_season):
             await interaction.response.send_message(
                 "There is no tournament season opened currently.", ephemeral=True
             )
             return
 
         if option:
-            if tournament.are_registrations_open:
+            if seasons.are_registrations_open:
                 await interaction.response.send_message(
                     "Cannot open the registrations! they are already open.",
                     ephemeral=True,
                 )
                 return
-            tournament.open_registrations()
+            if not seasons.open_registrations():
+                await interaction.response.send_message(
+                    "Cannot open — the season is not in a state that allows it.",
+                    ephemeral=True,
+                )
+                return
         else:
-            if not tournament.are_registrations_open:
+            if not seasons.are_registrations_open:
                 await interaction.response.send_message(
                     "Cannot close the registrations! they are already closed.",
                     ephemeral=True,
                 )
                 return
-            tournament.close_registrations()
+            if not seasons.close_registrations():
+                await interaction.response.send_message(
+                    "Failed to close registrations.",
+                    ephemeral=True,
+                )
+                return
 
         await interaction.response.send_message(
             f"{'Opened' if option else 'closed'} the registrations."
@@ -561,13 +707,13 @@ class TournamentCommands(
         self, interaction: Interaction, user: discord.Member, uuid: str
     ) -> None:
         """changes the uuid of the registered player"""
-        if not int(tournament.active_season):
+        if not int(seasons.active_season):
             await interaction.response.send_message(
                 "There is no tournament season opened currently.", ephemeral=True
             )
             return
 
-        registration = Registration(season_id=tournament.active_season)
+        registration = Registration(season_id=seasons.active_season)
         if not registration.is_registered(str(user.id)):
             await interaction.response.send_message(
                 "He is not registered.", ephemeral=True
@@ -583,14 +729,14 @@ class TournamentCommands(
     @require(Authority.LEADER)
     async def give_win(self, interaction: Interaction, match_index: int, team_index: int) -> None:
         """ gives win to the team"""
-        if not int(tournament.active_season):
+        if not int(seasons.active_season):
             await interaction.response.send_message(
                 "There is no tournament season opened currently.", ephemeral=True
             )
             return
 
         from tournament.brackets import Brackets
-        brackets = Brackets(season_id=tournament.active_season)
+        brackets = Brackets(season_id=seasons.active_season)
         response = brackets.give_win_to_team(match_index=match_index, team_index=team_index)
         await interaction.response.send_message(response, ephemeral=True)
 
@@ -599,7 +745,7 @@ class TournamentCommands(
     async def list_matches(self, interaction: Interaction) -> None:
         """lists all the matches in active round."""
         from tournament.brackets import Brackets
-        brackets = Brackets(season_id=tournament.active_season)
+        brackets = Brackets(season_id=seasons.active_season)
         matches = brackets.list_matches()
         if not matches:
             await interaction.response.send_message("There are no matches in the round.")
@@ -624,7 +770,7 @@ class TournamentCommands(
     @app_commands.command(name="teams")
     async def list_teams(self, interaction: Interaction) -> None:
         """lists the registered teams of the active season."""
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             await interaction.response.send_message(
                 "There is no tournament season opened currently.", ephemeral=True
@@ -690,7 +836,7 @@ class TournamentCommands(
     @require(Authority.LEADER)
     async def show_waitlist(self, interaction: Interaction) -> None:
         """lists the teams queued for the active season."""
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             await interaction.response.send_message(
                 "There is no tournament season opened currently.", ephemeral=True
@@ -717,13 +863,13 @@ class TournamentCommands(
     @require(Authority.LEADER)
     async def start_tournament(self, interaction: Interaction) -> None:
         """starts the tournament"""
-        if not int(tournament.active_season):
+        if not int(seasons.active_season):
             await interaction.response.send_message(
                 "There is no tournament season opened currently.", ephemeral=True
             )
             return
 
-        if tournament.are_registrations_open:
+        if seasons.are_registrations_open:
             await interaction.response.send_message(
                 "Cannot start the tournament! registrations are still open.",
                 ephemeral=True,
@@ -732,7 +878,7 @@ class TournamentCommands(
 
         from tournament.brackets import Brackets
 
-        brackets = Brackets(season_id=tournament.active_season)
+        brackets = Brackets(season_id=seasons.active_season)
         if brackets.read_meta().started:
             await interaction.response.send_message(
                 "The tournament is already started.",
@@ -754,7 +900,7 @@ class TournamentCommands(
                 ephemeral=True,
             )
             return
-        mode = tournament.get_season(tournament.active_season).mode
+        mode = seasons.get_season(seasons.active_season).mode
         is_groupstage = False
         try:
             if mode == TournamentMode.DOUBLE:
@@ -797,7 +943,7 @@ class TournamentCommands(
         if posts.hold_enabled():
             await asyncio.to_thread(
                 posts.announce_lines,
-                tournament.active_season,
+                seasons.active_season,
                 pings.rstrip("\n").split("\n"),
                 "Team captains list",
                 "captains",
@@ -805,8 +951,8 @@ class TournamentCommands(
         else:
             await interaction.followup.send(pings)
 
-        season = tournament.get_season(tournament.active_season)
+        season = seasons.get_season(seasons.active_season)
         season.stage = TournamentStage.IN_PROGRESS
-        tournament.update_season(season_id=tournament.active_season, season=season)
+        seasons.update_season(season_id=seasons.active_season, season=season)
 
         await refresh_register_panel(self.bot)

@@ -33,8 +33,8 @@ def _default_expire_seconds() -> float:
 def _season_team_size(season_id: str) -> int:
     """the number of players a team needs in this season, or 0 when unknown."""
     try:
-        from tournament.storage import tournament as tournament_storage
-        season = tournament_storage.get_season(season_id)
+        from tournament.storage import seasons
+        season = seasons.get_season(season_id)
         return season.type.count if season else 0
     except Exception:
         return 0
@@ -561,11 +561,11 @@ class Registration(Storage):
         the caller (bot) handles role creation, thread, and pings.
         """
         try:
-            from tournament.storage import tournament as tournament_storage
-            season = tournament_storage.get_season(self.season_id)
+            from tournament.storage import seasons
+            season = seasons.get_season(self.season_id)
         except Exception:
             return []
-        if season is None or season.stage != TournamentStage.REGISTRATION:
+        if season is None or season.stage not in (TournamentStage.NONE, TournamentStage.REGISTRATION):
             return []
 
         try:

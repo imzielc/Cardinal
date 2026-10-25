@@ -7,7 +7,7 @@ from discord.ext import commands
 from discord_bot.helpers import fetch_account_info, require
 from discord_bot.ui import LinkedAccountView
 from server.enums import Authority, TeamStatus
-from tournament import tournament
+from tournament import seasons
 from tournament.link import link
 from tournament.registration import Registration
 
@@ -129,7 +129,7 @@ class AccountCommands(
 
         reg_updated = False
         team_downgraded = False
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if int(season_id):
             registration = Registration(season_id=season_id)
             team = registration.team_of(discord_id)
@@ -171,7 +171,7 @@ class AccountCommands(
             )
             return
 
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if int(season_id):
             team = Registration(season_id=season_id).team_of(discord_id)
             if team:

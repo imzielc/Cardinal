@@ -3,7 +3,7 @@ import bascenev1
 
 from server.clients import Client, fetch_client
 from server.storage import MODS_DIR
-from tournament import tournament
+from tournament import seasons
 
 from . import patch_method
 
@@ -28,7 +28,7 @@ def on_player_request(self, player: bascenev1.SessionPlayer) -> bool:
 @patch_method(bascenev1.DualTeamSession, "on_player_leave", initial=True)
 def on_player_leave(self, player: bascenev1.SessionPlayer) -> None:
     identifier = self._player_requested_identifiers.get(player.id)
-    if identifier and int(tournament.active_season):
+    if identifier and int(seasons.active_season):
         from tournament.manager import manager
 
         manager.handle_player_leave(identifier)

@@ -18,7 +18,7 @@ from discord_bot.held_posts import HeldPosts
 from discord_bot.ui import RegisterView, TeamInvitationView
 from server import config
 from server.enums import TeamStatus
-from tournament import tournament
+from tournament import seasons
 from tournament.registration import Registration
 
 
@@ -51,7 +51,7 @@ class DiscordBot(commands.Bot):
 
     def _restore_invitations(self) -> None:
         """re-registers the invitation buttons of the pending teams, so they work after a restart."""
-        season_id = tournament.active_season
+        season_id = seasons.active_season
         if not int(season_id):
             return
 

@@ -42,12 +42,12 @@ class Manager:
 
     def sync(self) -> None:
         """picks up a season that was created, cancelled or moved on after the server started."""
-        from tournament import tournament
+        from tournament import seasons
 
         if self.active_match:
             return
-        if tournament.active_season != self.season_id:
-            self.initialize(tournament.active_season)
+        if seasons.active_season != self.season_id:
+            self.initialize(seasons.active_season)
         elif self.brackets:
             # a win given from the bot, or a new round, can change what is pending.
             self.load_pending_matches()

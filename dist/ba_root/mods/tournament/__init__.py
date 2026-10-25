@@ -1,5 +1,5 @@
 """hmph.."""
 
-from .storage import tournament
+from .storage import seasons
 
-__all__ = ["tournament"]
+__all__ = ["seasons"]

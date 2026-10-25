@@ -5,7 +5,7 @@ from bascenev1._dualteamsession import DualTeamSession
 
 from server import utils
 from server.clients import Client
-from tournament import tournament
+from tournament import seasons
 from tournament.manager import manager
 
 
@@ -121,7 +121,7 @@ class TournamentSession(DualTeamSession):
                     )
                 )
 
-                if manager.active_match.match.teams[winner.id].series >= tournament.series_length:
+                if manager.active_match.match.teams[winner.id].series >= seasons.series_length:
                     manager.active_match.match.winner_idx = winner.id
                     manager.active_match.match.loser_idx = loser.id
                     utils.success(

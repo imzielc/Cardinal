@@ -1,7 +1,7 @@
 """tournament-related commands."""
 
 from server.clients import Client
-from tournament import tournament
+from tournament import seasons
 from tournament.link import link
 from tournament.manager import manager
 from tournament.registration import Registration
@@ -12,7 +12,7 @@ from . import on_command
 @on_command(name="/ready")
 def ready(client: Client):
     """marks the player as ready and starts the match if everyone is ready."""
-    season_id = tournament.active_season
+    season_id = seasons.active_season
     if not int(season_id):
         client.error("There is no tournament ongoing.")
         return
@@ -33,7 +33,7 @@ def ready(client: Client):
 @on_command(name="/mpause")
 def pause(client: Client):
     """pauses the match if everyone agrees."""
-    season_id = tournament.active_season
+    season_id = seasons.active_season
     if not int(season_id):
         client.error("There is no tournament ongoing.")
         return
@@ -68,7 +68,7 @@ def link_account(client: Client, args: list[str]):
 @on_command(name="/verify")
 def verify(client: Client):
     """finishes the tournament registration for this game account."""
-    season_id = tournament.active_season
+    season_id = seasons.active_season
     if not int(season_id):
         client.error("There is no tournament ongoing.")
         return
