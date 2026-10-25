@@ -147,7 +147,7 @@ class Load(babase.Plugin):
         server.config.bootstrap()
         roles.roles.bootstrap()
         roles.auth.bootstrap()
-        tournament.tournament.bootstrap()
+        tournament.seasons.bootstrap()
         stats.stats.bootstrap()
 
         # the tournament manager.
