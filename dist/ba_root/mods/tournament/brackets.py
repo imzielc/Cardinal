@@ -116,11 +116,15 @@ class Brackets(Storage):
             send_event("round_started", season_id=self.season_id, matches=payload)
 
     def _queue_round_start(self, matches: list[dict]) -> None:
-        """stores a round transition for release during the night window."""
+        """merges matches into the pending transition, existing keys are left as they are."""
         if not matches:
             return
         brackets = self.read_meta()
-        brackets.pending_round_start = matches
+        have = {m["key"] for m in brackets.pending_round_start}
+        for m in matches:
+            if m["key"] not in have:
+                brackets.pending_round_start.append(m)
+                have.add(m["key"])
         self.commit_meta(brackets)
 
     def release_pending_rounds(self) -> bool:
@@ -141,19 +145,14 @@ class Brackets(Storage):
         return True
 
     def _try_queue_transition(self, old_rounds: list[str], completed: bool = False) -> None:
-        """queues matches from newly-playable rounds. nothing to do if none or completed."""
+        """queues matches from newly-playable rounds, merging into whatever is already pending."""
         if completed:
             return
         brackets = self.read_meta()
-        if brackets.pending_round_start:
-            # a transition is already queued, it will be released in order.
-            return
         new_only = [r for r in brackets.active_rounds if r not in old_rounds]
         if not new_only:
             return
-        matches = self._build_round_payload(new_only)
-        self._queue_round_start(matches)
-
+        self._queue_round_start(self._build_round_payload(new_only))
     # ---- group stage ----
 
     def generate_group_stage(self, teams: list) -> None | bool:
@@ -659,6 +658,8 @@ class Brackets(Storage):
             self.update_gs_match(match=match)
         else:
             self.update_match(match=match)
+
+        send_event("match_ended", season_id=self.season_id, key=match_key)
 
         self.send_results(match, match_key)
         self.send_players_dashboard()

@@ -1,7 +1,5 @@
 """storages for handling tournament data."""
 
-import shutil
-from pathlib import Path
 from typing import override
 
 from server.storage import Storage, DATA_DIR
@@ -19,24 +17,9 @@ class Seasons(Storage):
         super().__init__("seasons.json", SEASONS_DIR)
 
     def bootstrap(self) -> None:
-        """creates the file if missing, migrates from the old tournament.json."""
-        old_file = self.directory / "tournament.json"
-        if old_file.exists() and not self.path.exists():
-            # keep the original as .old so a bad migration can be undone by hand.
-            shutil.copy2(old_file, self.path)
-            old_file.rename(old_file.with_suffix(".json.old"))
-
+        """creates the file if missing."""
         if not self.path.exists():
             self.commit(SeasonsSchema())
-            return
-
-        raw = super().read()
-        if "registrations_status" in raw:
-            flag = bool(raw.pop("registrations_status"))
-            for season in raw.get("seasons", {}).values():
-                if season.get("stage") == "REGISTRATION" and not flag:
-                    season["stage"] = "NONE"
-            super().commit(raw)
 
     @property
     def active_season(self) -> str:

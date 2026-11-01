@@ -309,20 +309,21 @@ def _settle_grand_final(stage: Stage) -> None:
 
 
 def _update_statuses(stage: Stage) -> None:
-    """a round is completed when all its matches are, in progress when a match of it can be played."""
+    """a round is completed when all its matches are, in progress when every unfinished
+    match has both teams known, and pending otherwise."""
     for rounds in stage.values():
         for round_data in rounds.values():
             matches = round_data.matches.values()
             if all(match.status == Status.COMPLETED for match in matches):
                 round_data.status = Status.COMPLETED
-            elif any(
-                match.status != Status.COMPLETED and all(slot.name is not None for slot in match.teams)
+            elif all(
+                match.status == Status.COMPLETED
+                or all(slot.name is not None for slot in match.teams)
                 for match in matches
             ):
                 round_data.status = Status.IN_PROGRESS
             else:
                 round_data.status = Status.PENDING
-
 
 def active_rounds(stage: Stage) -> list[str]:
     """the rounds that can be played right now, as "bracket/round"."""

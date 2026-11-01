@@ -420,13 +420,17 @@ async def on_round_started(bot: commands.Bot, payload: dict) -> None:
 
     matches = payload.get("matches") or []
     existing = match_threads.get(season_id)
-    new_keys = {str(m.get("key") or "") for m in matches if m.get("key")}
 
-    # drop threads for matches that are no longer playable.
-    for key in list(existing.keys()):
-        if key in new_keys:
-            continue
-        await _delete_thread(bot, existing.pop(key))
+    # drop threads whose match is no longer live for this season.
+    try:
+        from tournament.brackets import Brackets
+        live = set(Brackets(season_id=season_id).list_matches(include_pending=True).keys())
+    except Exception:
+        live = None
+    if live is not None:
+        for key in list(existing.keys()):
+            if key not in live:
+                await _delete_thread(bot, existing.pop(key))
 
     if not matches:
         match_threads.set(season_id, existing)
