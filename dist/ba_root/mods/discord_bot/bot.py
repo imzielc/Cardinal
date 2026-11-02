@@ -15,7 +15,8 @@ from discord_bot.cogs.scheduler import RoundScheduler
 from discord_bot.cogs.tournament import TournamentCommands
 from discord_bot.events import EventReceiver, _delete_thread, on_round_started
 from discord_bot.held_posts import HeldPosts
-from discord_bot.ui import RegisterView, TeamInvitationView
+from discord_bot.ui import RegisterView, TeamInvitationView, ReadyPanelView
+from tournament.ready_panels import ready_panels
 from server import config
 from server.enums import TeamStatus
 from tournament import seasons
@@ -37,6 +38,7 @@ class DiscordBot(commands.Bot):
     
     async def setup_hook(self) -> None:
         self._restore_invitations()
+        self._restore_ready_panels()
         # the registration panel's button must keep working after a restart.
         self.add_view(RegisterView())
         # start listening for game-side events.
@@ -101,6 +103,20 @@ class DiscordBot(commands.Bot):
         for team_id, team in Registration(season_id=season_id).read().teams.items():
             if team.status == TeamStatus.IN_INVITATION:
                 self.add_view(TeamInvitationView(team_id=team_id, season_id=season_id))
+
+    def _restore_ready_panels(self) -> None:
+        """re-registers the ready panel buttons that survived a restart."""
+        season_id = str(seasons.active_season)
+        if not int(season_id):
+            return
+        for match_key, entry in ready_panels.items(season_id):
+            self.add_view(
+                ReadyPanelView(
+                    season_id,
+                    match_key,
+                    can_force=bool(entry.get("can_force", False)),
+                )
+            )
 
     async def on_app_cmd_error(
         self, interaction: Interaction, error: app_commands.AppCommandError

@@ -87,6 +87,12 @@ class SocketTunnel(threading.Thread):
                     pass
             sock.sendto(json.dumps(result).encode("utf-8"), addr)
 
+        elif action == "force_start_match":
+            from tournament.manager import manager
+
+            result = manager.force_start_match(data["match_key"])
+            sock.sendto(json.dumps(result).encode("utf-8"), addr)
+
     def shutdown(self) -> None:
         """shuts down the thread gracefully."""
         if not self.running:

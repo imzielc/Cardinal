@@ -148,6 +148,10 @@ class TournamentCommands(
             )
 
             await cleanup_season(self.bot, season_id)
+            
+            from tournament.ready_panels import ready_panels
+
+            ready_panels.clear_season(season_id)
 
             seasons.cancel_season(season_id)
             cancelled = await asyncio.to_thread(posts.cancel_season, season_id)
@@ -561,6 +565,52 @@ class TournamentCommands(
             abort_text="You're still on the team.",
         )
         await interaction.response.send_message(prompt, view=view, ephemeral=True)
+
+    @app_commands.command(name="start-match")
+    @app_commands.describe(match_index="The match number from /tournament list")
+    @require(Authority.LEADER)
+    async def start_match(self, interaction: Interaction, match_index: int) -> None:
+        """starts a match by index. requires one ready player per team."""
+        if not int(seasons.active_season):
+            await interaction.response.send_message(
+                "There is no tournament season opened currently.", ephemeral=True
+            )
+            return
+
+        from tournament.brackets import Brackets
+
+        brackets = Brackets(season_id=seasons.active_season)
+        matches = brackets.list_matches()
+        match_ids = list(matches.keys())
+        if match_index < 1 or match_index > len(match_ids):
+            await interaction.response.send_message(
+                f"Invalid match index. Must be 1-{len(match_ids)}.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await GameClient().send_action(
+                "force_start_match",
+                match_key=match_ids[match_index - 1],
+                response=True,
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Failed to send: {e}", ephemeral=True)
+            return
+
+        if result is None:
+            await interaction.followup.send(
+                "The game didn't respond. It may have started anyway — check `/tournament list`.",
+                ephemeral=True,
+            )
+            return
+        if result.get("started"):
+            await interaction.followup.send("Match started.", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Could not start: {result.get('error', 'unknown')}.", ephemeral=True
+        )
 
     @app_commands.command(name="extend")
     @app_commands.describe(hours="How many hours to add to the invitation expiry (1-168)")

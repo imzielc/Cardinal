@@ -1016,3 +1016,49 @@ class TeamInvitationView(ui.LayoutView):
                 )
             except discord.HTTPException:
                 pass
+
+class ReadyPanelView(ui.View):
+    """the Force Start button on a ready panel. staff only."""
+
+    def __init__(self, season_id: str, match_key: str, can_force: bool) -> None:
+        super().__init__(timeout=None)
+        self.season_id = season_id
+        self.match_key = match_key
+
+        start = ui.Button(
+            label="Force Start",
+            style=ButtonStyle.success,
+            custom_id=f"ready;start;{season_id};{match_key}",
+            disabled=not can_force,
+        )
+        start.callback = self._start
+        self.add_item(start)
+
+    async def interaction_check(self, interaction: Interaction) -> bool:
+        from discord_bot.held_posts import is_owner
+
+        if not is_owner(interaction.user.id):
+            await interaction.response.send_message(
+                "Only staff can start matches.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _start(self, interaction: Interaction) -> None:
+        from discord_bot.client import GameClient
+
+        await interaction.response.defer()
+        result = await GameClient().send_action(
+            "force_start_match", match_key=self.match_key, response=True
+        )
+        if result and result.get("started"):
+            await interaction.edit_original_response(
+                content=f"{interaction.message.content}\n\n*Started by {interaction.user.mention}.*",
+                view=None,
+            )
+            from tournament.ready_panels import ready_panels
+
+            ready_panels.remove(self.season_id, self.match_key)
+            return
+        reason = (result or {}).get("error", "no response from the game")
+        await interaction.followup.send(f"Couldn't start: {reason}.", ephemeral=True)

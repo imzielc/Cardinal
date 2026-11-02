@@ -365,6 +365,47 @@ def _match_header(payload_match: dict) -> str:
 
 # ---- handlers ----
 
+def _ready_panel_content(match_key: str, snapshot: dict) -> str:
+    teams = snapshot.get("teams") or {}
+    names = list(teams.keys())
+    title = " vs ".join(names) if names else match_key
+    lines = [f"**Ready panel — {title}**", ""]
+
+    for team_name, info in teams.items():
+        marks = "  ".join(
+            f"<@{m['discord_id']}> {'✓' if m['ready'] else '✗'}"
+            for m in info["members"]
+        )
+        lines.append(f"**{team_name}** {info['ready']}/{info['size']} — {marks}")
+
+    lines.append("")
+    total_ready = snapshot.get("total_ready", 0)
+    min_total = snapshot.get("min_total", 0)
+
+    if snapshot.get("min_met"):
+        lines.append(f"Min met ({total_ready} ready, min {min_total}) — starting.")
+    elif not snapshot.get("floor_met"):
+        lines.append(f"{total_ready}/{min_total} ready · need ≥1 from each side.")
+    else:
+        lines.append(
+            f"{total_ready}/{min_total} ready · "
+            f"{min_total - total_ready} more for auto-start."
+        )
+
+    return "\n".join(lines)[:2000]
+
+
+async def _finalize_ready_panel(
+    bot: commands.Bot, channel_id: int, message_id: int, status: str
+) -> None:
+    try:
+        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        message = await channel.fetch_message(int(message_id))
+        base = message.content or ""
+        await message.edit(content=f"{base}\n\n*{status}*", view=None)
+    except Exception:
+        pass
+
 
 async def on_team_verified(bot: commands.Bot, payload: dict) -> None:
     """refreshes the panel and the invitation view after a member verifies."""
@@ -586,6 +627,9 @@ async def on_tournament_completed(bot: commands.Bot, payload: dict) -> None:
         return
     await cleanup_season(bot, season_id)
     await refresh_register_panel(bot)
+    from tournament.ready_panels import ready_panels
+
+    ready_panels.clear_season(season_id)
 
 
 async def on_match_announcement(bot: commands.Bot, payload: dict) -> None:
@@ -610,6 +654,66 @@ async def on_match_announcement(bot: commands.Bot, payload: dict) -> None:
     except Exception as e:
         print(f"Discord: match announcement failed: {e}")
 
+async def on_ready_panel(bot: commands.Bot, payload: dict) -> None:
+    from tournament import posts
+    from tournament.ready_panels import ready_panels
+    from discord_bot.ui import ReadyPanelView
+
+    season_id = str(payload.get("season_id") or "")
+    match_key = str(payload.get("match_key") or "")
+    state = payload.get("state") or "waiting"
+    if not season_id or not match_key:
+        return
+
+    if state == "started":
+        entry = ready_panels.get(season_id, match_key)
+        if entry:
+            await _finalize_ready_panel(
+                bot, entry["channel_id"], entry["message_id"], "Match started."
+            )
+            ready_panels.remove(season_id, match_key)
+        return
+
+    snapshot = payload.get("snapshot") or {}
+    if not snapshot:
+        return
+
+    total_ready = int(snapshot.get("total_ready") or 0)
+    entry = ready_panels.get(season_id, match_key)
+
+    # panel only exists from the 2nd /ready onwards.
+    if total_ready < 2 and not entry:
+        return
+
+    channel_id = posts.staff_channel_id()
+    if not channel_id:
+        return
+
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    except Exception:
+        return
+    if channel is None:
+        return
+
+    content = _ready_panel_content(match_key, snapshot)
+    can_force = bool(snapshot.get("floor_met"))
+    view = ReadyPanelView(season_id, match_key, can_force=can_force)
+
+    if entry and entry.get("channel_id") == channel_id:
+        try:
+            message = await channel.fetch_message(int(entry["message_id"]))
+            await message.edit(content=content, view=view)
+            ready_panels.update_can_force(season_id, match_key, can_force)
+            return
+        except Exception:
+            ready_panels.remove(season_id, match_key)
+
+    try:
+        message = await channel.send(content, view=view)
+    except Exception:
+        return
+    ready_panels.set(season_id, match_key, message.id, channel_id, can_force)
 
 HANDLERS = {
     "team_verified": on_team_verified,
@@ -617,4 +721,5 @@ HANDLERS = {
     "match_ended": on_match_ended,
     "tournament_completed": on_tournament_completed,
     "match_announcement": on_match_announcement,
+    "ready_panel": on_ready_panel,
 }

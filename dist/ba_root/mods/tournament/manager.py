@@ -125,33 +125,50 @@ class Manager:
                 "message": "You are not registered for any matches.",
             }
 
-        # if a match is already active, we cannot accept the player.
         if self.active_match:
             return {"status": "error", "message": "A match is already active."}
 
         if account_id in self.ready_players.get(match_id, set()):
             return {"status": "error", "message": "You are already ready."}
 
-        match = self.pending_matches[match_id]
+        match = self.pending_matches.get(match_id)
+        if match is None:
+            return {"status": "error", "message": "This match is no longer pending."}
 
         if uuid not in match.uuids:
-            return {"status": "error", "message": "Your device uuid seems to have changed, contact the server admins."}
+            return {
+                "status": "error",
+                "message": "Your device uuid seems to have changed, contact the server admins.",
+            }
 
         self.ready_players[match_id].add(account_id)
+        snapshot = self._readiness_snapshot(match_id)
 
-        result = {"status": "success", "message": "You have been marked as ready."}
-
-        # if all players of a match are ready, we can start the match.
-        if self.ready_players[match_id] == set(match.players):
+        if snapshot["min_met"]:
             self.active_match = match
-            # clean-up them from the pending matches and ready players.
-            del self.pending_matches[match_id]
-            del self.ready_players[match_id]
+            self.pending_matches.pop(match_id, None)
+            self.ready_players.pop(match_id, None)
+            send_event(
+                "ready_panel",
+                season_id=self.season_id,
+                match_key=match_id,
+                state="started",
+            )
             with bascenev1.ContextRef.empty():
                 bascenev1.apptimer(5.0, self.start_tournament_session)
-            result["start"] = True
+            return {"status": "success", "message": "Match starting.", "start": True}
 
-        return result
+        send_event(
+            "ready_panel",
+            season_id=self.season_id,
+            match_key=match_id,
+            state="waiting",
+            snapshot=snapshot,
+        )
+        return {
+            "status": "success",
+            "message": f"Ready: {snapshot['total_ready']}/{snapshot['min_total']}.",
+        }
 
     def _captain_account_of(self, team_name: str) -> str | None:
         """the game account id of the team's captain, or None if unresolvable."""
@@ -236,12 +253,78 @@ class Manager:
         match_id = self.players.get(account_id, [None, None])[0]
         if not match_id:
             return
-
         if self.active_match:
             return
-
         if account_id in self.ready_players.get(match_id, set()):
-            self.ready_players[match_id].remove(account_id)
+            self.ready_players[match_id].discard(account_id)
+            if match_id in self.pending_matches:
+                snapshot = self._readiness_snapshot(match_id)
+                send_event(
+                    "ready_panel",
+                    season_id=self.season_id,
+                    match_key=match_id,
+                    state="waiting",
+                    snapshot=snapshot,
+                )
+
+    def _readiness_snapshot(self, match_id: str) -> dict:
+        """per-team ready counts, min thresholds, and flags for the bot panel."""
+        match = self.pending_matches[match_id]
+        ready = self.ready_players.get(match_id, set())
+        teams_info: dict[str, dict] = {}
+        for match_team in match.match.teams:
+            team_name = match_team.name
+            if not team_name:
+                continue
+            team_schema = self.brackets.get_team(team_name)
+            members = [
+                {"discord_id": m.discord_id, "ready": m.account_id in ready}
+                for m in team_schema.members
+            ]
+            size = len(members)
+            teams_info[team_name] = {
+                "size": size,
+                "min": max(1, size - 1),
+                "ready": sum(1 for m in members if m["ready"]),
+                "members": members,
+            }
+
+        min_total = sum(t["min"] for t in teams_info.values())
+        total_ready = sum(t["ready"] for t in teams_info.values())
+        total_players = sum(t["size"] for t in teams_info.values())
+        return {
+            "teams": teams_info,
+            "min_total": min_total,
+            "total_ready": total_ready,
+            "total_players": total_players,
+            "min_met": all(t["ready"] >= t["min"] for t in teams_info.values()),
+            "floor_met": all(t["ready"] >= 1 for t in teams_info.values()),
+        }
+
+    def force_start_match(self, match_key: str) -> dict:
+        """starts a match at staff's request. requires one ready per team, no more."""
+        match_key = str(match_key)
+        if self.active_match:
+            return {"started": False, "error": "A match is already active."}
+        match = self.pending_matches.get(match_key)
+        if match is None:
+            return {"started": False, "error": "No such pending match."}
+        if not self._readiness_snapshot(match_key)["floor_met"]:
+            return {"started": False, "error": "Need at least one player per team."}
+
+        self.active_match = match
+        self.pending_matches.pop(match_key, None)
+        self.ready_players.pop(match_key, None)
+        self.pause_players.pop(match_key, None)
+        send_event(
+            "ready_panel",
+            season_id=self.season_id,
+            match_key=match_key,
+            state="started",
+        )
+        with bascenev1.ContextRef.empty():
+            bascenev1.apptimer(5.0, self.start_tournament_session)
+        return {"started": True}
 
     def conclude_active_match(self) -> None:
         """concludes the active match."""
