@@ -1062,3 +1062,142 @@ class ReadyPanelView(ui.View):
             return
         reason = (result or {}).get("error", "no response from the game")
         await interaction.followup.send(f"Couldn't start: {reason}.", ephemeral=True)
+
+class BenchPanelView(ui.View):
+    """the panel posted in a team thread when the captain requests a bench activation.
+    only the out player can click."""
+
+    def __init__(self, season_id: str, match_key: str, team: str, out_discord_id: str) -> None:
+        super().__init__(timeout=None)
+        self.season_id = season_id
+        self.match_key = match_key
+        self.team = team
+        self.out_discord_id = out_discord_id
+
+        accept = ui.Button(
+            label="I can play",
+            style=ButtonStyle.secondary,
+            custom_id=f"bench;decline;{match_key};{team}",
+        )
+        accept.callback = self._decline
+        confirm = ui.Button(
+            label="I can't play",
+            style=ButtonStyle.success,
+            custom_id=f"bench;confirm;{match_key};{team}",
+        )
+        confirm.callback = self._confirm
+        self.add_item(accept)
+        self.add_item(confirm)
+
+    async def interaction_check(self, interaction: Interaction) -> bool:
+        if str(interaction.user.id) != self.out_discord_id:
+            await interaction.response.send_message(
+                "Only the player being replaced can answer this.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _decline(self, interaction: Interaction) -> None:
+        from discord_bot.client import GameClient
+        from tournament.bench_panels import bench_panels
+
+        await interaction.response.defer()
+        result = await GameClient().send_action(
+            "resolve_bench",
+            match_key=self.match_key,
+            team=self.team,
+            resolution="decline",
+            response=True,
+        )
+        if result and result.get("ok"):
+            await interaction.edit_original_response(
+                content=f"Substitution declined by <@{interaction.user.id}>. Original roster plays.",
+                view=None,
+            )
+            bench_panels.remove(self.season_id, self.match_key, self.team)
+            return
+        await interaction.followup.send(
+            (result or {}).get("error", "could not resolve"), ephemeral=True
+        )
+
+    async def _confirm(self, interaction: Interaction) -> None:
+        from discord_bot.client import GameClient
+        from tournament.bench_panels import bench_panels
+
+        await interaction.response.defer()
+        result = await GameClient().send_action(
+            "resolve_bench",
+            match_key=self.match_key,
+            team=self.team,
+            resolution="confirm",
+            response=True,
+        )
+        if result and result.get("ok"):
+            await interaction.edit_original_response(
+                content=f"Confirmed by <@{interaction.user.id}>. Stand-in plays this match.",
+                view=None,
+            )
+            bench_panels.remove(self.season_id, self.match_key, self.team)
+            return
+        await interaction.followup.send(
+            (result or {}).get("error", "could not resolve"), ephemeral=True
+        )
+
+
+class SwapVoteView(ui.View):
+    """approve or reject a permanent roster swap."""
+
+    def __init__(self, season_id: str, vote_id: str, team_id: str) -> None:
+        super().__init__(timeout=None)
+        self.season_id = season_id
+        self.vote_id = vote_id
+        self.team_id = team_id
+
+        yes = ui.Button(
+            label="Approve", style=ButtonStyle.success,
+            custom_id=f"swap;yes;{vote_id}",
+        )
+        yes.callback = self._approve
+        no = ui.Button(
+            label="Reject", style=ButtonStyle.danger,
+            custom_id=f"swap;no;{vote_id}",
+        )
+        no.callback = self._reject
+        self.add_item(yes)
+        self.add_item(no)
+
+    async def interaction_check(self, interaction: Interaction) -> bool:
+        from tournament.registration import Registration
+
+        if not Registration(self.season_id).is_registered(str(interaction.user.id)):
+            await interaction.response.send_message(
+                "Only registered players in this season can vote.", ephemeral=True
+            )
+            return False
+        team = Registration(self.season_id).team_of(str(interaction.user.id))
+        if team and team.id == self.team_id:
+            await interaction.response.send_message(
+                "You can't vote on your own team's swap.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _cast(self, interaction: Interaction, choice: str) -> None:
+        from tournament.votes import Votes
+
+        vote = Votes(self.season_id).cast(self.vote_id, str(interaction.user.id), choice)
+        if vote is None:
+            await interaction.response.send_message(
+                "This vote is closed or the choice was rejected.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            f"Vote recorded: {choice}. You can change it any time before the vote closes.",
+            ephemeral=True,
+        )
+
+    async def _approve(self, interaction: Interaction) -> None:
+        await self._cast(interaction, "yes")
+
+    async def _reject(self, interaction: Interaction) -> None:
+        await self._cast(interaction, "no")

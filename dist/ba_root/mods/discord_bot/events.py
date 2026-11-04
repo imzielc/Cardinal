@@ -21,6 +21,7 @@ from discord_bot.ui import (
     create_team_thread,
     refresh_register_panel,
 )
+from discord_bot.ui import BenchPanelView, SwapVoteView
 from server import config
 from tournament import seasons
 from tournament.match_threads import match_threads
@@ -672,6 +673,19 @@ async def on_ready_panel(bot: commands.Bot, payload: dict) -> None:
                 bot, entry["channel_id"], entry["message_id"], "Match started."
             )
             ready_panels.remove(season_id, match_key)
+
+        from tournament.bench_panels import bench_panels
+        for bkey, bteam, bentry in list(bench_panels.items(season_id)):
+            if bkey != match_key:
+                continue
+            try:
+                ch = bot.get_channel(bentry["channel_id"]) or \
+                    await bot.fetch_channel(bentry["channel_id"])
+                msg = await ch.fetch_message(bentry["message_id"])
+                await msg.edit(content=f"{msg.content}\n\n*Match started.*", view=None)
+            except Exception:
+                pass
+            bench_panels.remove(season_id, bkey, bteam)
         return
 
     snapshot = payload.get("snapshot") or {}
@@ -715,6 +729,138 @@ async def on_ready_panel(bot: commands.Bot, payload: dict) -> None:
         return
     ready_panels.set(season_id, match_key, message.id, channel_id, can_force)
 
+async def on_bench_activation(bot: commands.Bot, payload: dict) -> None:
+    from tournament.bench_panels import bench_panels
+
+    season_id = str(payload.get("season_id") or "")
+    match_key = str(payload.get("match_key") or "")
+    team = str(payload.get("team") or "")
+    out_discord = str(payload.get("out_discord_id") or "")
+    in_discord = str(payload.get("in_discord_id") or "")
+    team_thread_id = int(payload.get("team_thread_id") or 0)
+    if not (season_id and match_key and team and out_discord and in_discord and team_thread_id):
+        return
+
+    try:
+        thread = bot.get_channel(team_thread_id) or await bot.fetch_channel(team_thread_id)
+    except Exception:
+        return
+    if thread is None:
+        return
+
+    content = (
+        f"**Substitution request**\n\n"
+        f"<@{out_discord}> — your captain wants <@{in_discord}> to stand in for you this match.\n"
+        f"Click below. If you don't answer within 6 hours, the substitution goes through."
+    )
+    view = BenchPanelView(season_id, match_key, team, out_discord)
+    try:
+        message = await thread.send(
+            content,
+            view=view,
+            allowed_mentions=discord.AllowedMentions(
+                users=[discord.Object(id=int(out_discord))],
+                roles=False, everyone=False,
+            ),
+        )
+    except Exception:
+        return
+    bench_panels.set(season_id, match_key, team, message.id, team_thread_id, out_discord)
+
+
+async def on_swap_vote_opened(bot: commands.Bot, payload: dict) -> None:
+    from tournament.votes import Votes
+
+    season_id = str(payload.get("season_id") or "")
+    vote_id = str(payload.get("vote_id") or "")
+    if not (season_id and vote_id):
+        return
+
+    vote = Votes(season_id).get(vote_id)
+    if not vote:
+        return
+
+    try:
+        channel_id = int(config.discord.get("brackets_channel_id", 0))
+    except (TypeError, ValueError):
+        channel_id = 0
+    if not channel_id:
+        return
+
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    except Exception:
+        return
+    if channel is None:
+        return
+
+    content = (
+        f"**Roster change vote — Season {season_id}**\n\n"
+        f"Team **{vote.team_id}** is asking to replace <@{vote.out_discord_id}> "
+        f"with <@{vote.in_discord_id}> for the rest of the season.\n"
+        f"Reason: {vote.reason or 'none given.'}\n\n"
+        f"Any registered player in this season except {vote.team_id} can vote. "
+        f"Closes <t:{int(vote.closes_at)}:R>. Most votes wins, a tie fails."
+    )
+    view = SwapVoteView(season_id, vote_id, vote.team_id)
+    try:
+        message = await channel.send(content, view=view)
+    except Exception:
+        return
+    Votes(season_id).set_message(vote_id, message.id, channel_id)
+
+
+async def on_swap_vote_closed(bot: commands.Bot, payload: dict) -> None:
+    from tournament.votes import Votes
+    from tournament.registration import Registration
+
+    season_id = str(payload.get("season_id") or "")
+    vote_id = str(payload.get("vote_id") or "")
+    outcome = str(payload.get("outcome") or "")
+    if not (season_id and vote_id and outcome):
+        return
+
+    votes_store = Votes(season_id)
+    vote = votes_store.get(vote_id)
+    if not vote:
+        return
+
+    yes = sum(1 for v in vote.votes.values() if v == "yes")
+    no = sum(1 for v in vote.votes.values() if v == "no")
+
+    if outcome == "PASSED":
+        Registration(season_id).change_account_id(
+            vote.team_id, vote.out_discord_id, vote.in_account_id
+        )
+
+    try:
+        channel = bot.get_channel(vote.channel_id) or await bot.fetch_channel(vote.channel_id)
+    except Exception:
+        channel = None
+    if channel is None:
+        return
+
+    try:
+        message = await channel.fetch_message(vote.message_id)
+    except Exception:
+        return
+
+    if outcome == "PASSED":
+        footer = (
+            f"**Passed.** {vote.team_id} — <@{vote.out_discord_id}> out, "
+            f"<@{vote.in_discord_id}> in. {yes} approve, {no} reject.\n"
+            f"The new member needs to run /verify in-game."
+        )
+    else:
+        footer = (
+            f"**Failed.** {vote.team_id} — roster unchanged. "
+            f"{yes} approve, {no} reject."
+        )
+    try:
+        await message.edit(content=f"{message.content}\n\n{footer}", view=None)
+    except Exception:
+        pass
+
 HANDLERS = {
     "team_verified": on_team_verified,
     "round_started": on_round_started,
@@ -722,4 +868,7 @@ HANDLERS = {
     "tournament_completed": on_tournament_completed,
     "match_announcement": on_match_announcement,
     "ready_panel": on_ready_panel,
+    "bench_activation": on_bench_activation,
+    "swap_vote_opened": on_swap_vote_opened,
+    "swap_vote_closed": on_swap_vote_closed,
 }

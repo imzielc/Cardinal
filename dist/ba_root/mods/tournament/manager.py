@@ -1,16 +1,21 @@
 import os
+import time
 
 import bascenev1
 
 from server.enums import Status
 from server.notify import send_event
 from tournament.brackets import Brackets
-from tournament.schema import MatchSchema, PendingMatchSchema
+from tournament.schema import (
+    BenchActivationSchema,
+    MatchSchema,
+    PendingMatchSchema,
+)
+
+BENCH_ACTIVATION_TIMEOUT = 6 * 3600
 
 
 class Manager:
-    """manager class for tournament matches."""
-
     def __init__(self):
         self.pending_matches: dict[str, PendingMatchSchema] = {}
         self.players = {}
@@ -22,26 +27,20 @@ class Manager:
 
         self.active_match: PendingMatchSchema | None = None
 
-        # set while a match-completion or pause transition is pending, so a
-        # second end_tournament_session call does not schedule a second timer.
         self._transitioning: bool = False
 
     def initialize(self, season_id: str):
-        """initializes the manager."""
         self.season_id = season_id
         if not int(season_id):
-            # no season is going on, nothing to load (and no junk season folder).
             self.brackets = None
             self.pending_matches.clear()
             self.players.clear()
             return
         self.brackets = Brackets(season_id=season_id)
-        # repairs a bracket a crash only saved partly, before the matches are loaded.
         self.brackets.refresh()
         self.load_pending_matches()
 
     def sync(self) -> None:
-        """picks up a season that was created, cancelled or moved on after the server started."""
         from tournament import seasons
 
         if self.active_match:
@@ -49,12 +48,9 @@ class Manager:
         if seasons.active_season != self.season_id:
             self.initialize(seasons.active_season)
         elif self.brackets:
-            # a win given from the bot, or a new round, can change what is pending.
             self.load_pending_matches()
 
     def cancel(self) -> None:
-        """forgets the tournament, the season was cancelled. a match that is being played is stopped
-        and the server restarts, like it does when a match ends."""
         was_playing = self.active_match is not None
         self.active_match = None
         self.pending_matches.clear()
@@ -68,55 +64,310 @@ class Manager:
             self.end_tournament_session()
 
     def load_pending_matches(self):
-        """load all pending matches from the database."""
         self.pending_matches.clear()
         self.players.clear()
 
-        # we need to load all the matches from the rounds.
         matches = self.brackets.list_matches()
         for key, match in matches.items():
             if match.status == Status.PENDING:
-                self.register_pending_match(
-                    key=key,
-                    match=match,
-                )
+                self.register_pending_match(key=key, match=match)
 
-    def register_pending_match(
-        self,
-        key: str,
-        match: MatchSchema,
-    ):
-        """registers a pending match."""
+    def register_pending_match(self, key: str, match: MatchSchema):
         team1 = match.teams[0].name
         team2 = match.teams[1].name
 
-        players1 = self.extract_from_team_players(team1, key="account_id")
-        players2 = self.extract_from_team_players(team2, key="account_id")
+        team1_schema = self.brackets.get_team(team1)
+        team2_schema = self.brackets.get_team(team2)
+
+        team1_accounts = [m.account_id for m in team1_schema.mains if m.account_id]
+        team2_accounts = [m.account_id for m in team2_schema.mains if m.account_id]
+        team1_uuids = [m.device_uuid for m in team1_schema.mains if m.account_id]
+        team2_uuids = [m.device_uuid for m in team2_schema.mains if m.account_id]
 
         self.pending_matches[key] = PendingMatchSchema(
             key=key,
             match=match,
-            uuids=self.extract_from_team_players(team1, key="device_uuid")
-            + self.extract_from_team_players(team2, key="device_uuid"),
-            players=players1 + players2,
+            uuids=team1_uuids + team2_uuids,
+            players=team1_accounts + team2_accounts,
+            teams={team1: list(team1_accounts), team2: list(team2_accounts)},
         )
 
         if key not in self.ready_players:
             self.ready_players[key] = set()
         if key not in self.pause_players:
             self.pause_players[key] = set()
-        for team, players in ((team1, players1), (team2, players2)):
-            for player in players:
-                self.players[player] = [key, team]
+        for team, accounts in ((team1, team1_accounts), (team2, team2_accounts)):
+            for account_id in accounts:
+                self.players[account_id] = [key, team]
 
-    def extract_from_team_players(self, team_id: str, key: str) -> list:
-        """extracts the key from team dict players."""
-        return [
-            getattr(member, key) for member in self.brackets.get_team(team_id=team_id).members
-        ]
+        self._apply_bench_activations(key)
+
+    # ---- bench activation ----
+
+    def _apply_bench_activations(self, match_key: str) -> None:
+        pending = self.pending_matches.get(match_key)
+        if not pending:
+            return
+        for team_name, activation in list(pending.match.bench_activations.items()):
+            if activation.state in ("PENDING", "ACCEPTED", "FORCE"):
+                self._apply_bench_activation(match_key, team_name)
+
+    def _apply_bench_activation(self, match_key: str, team_name: str) -> None:
+        pending = self.pending_matches.get(match_key)
+        if not pending:
+            return
+        activation = pending.match.bench_activations.get(team_name)
+        if not activation:
+            return
+
+        team_accounts = pending.teams.get(team_name, [])
+        if activation.out_account_id in team_accounts:
+            team_accounts[team_accounts.index(activation.out_account_id)] = activation.in_account_id
+
+        if activation.out_account_id in pending.players:
+            idx = pending.players.index(activation.out_account_id)
+            pending.players[idx] = activation.in_account_id
+            if idx < len(pending.uuids):
+                pending.uuids[idx] = activation.in_uuid
+
+        self.players.pop(activation.out_account_id, None)
+        self.players[activation.in_account_id] = [match_key, team_name]
+
+    def _revert_bench_activation(self, match_key: str, team_name: str) -> None:
+        pending = self.pending_matches.get(match_key)
+        if not pending:
+            return
+        activation = pending.match.bench_activations.get(team_name)
+        if not activation:
+            return
+
+        team_accounts = pending.teams.get(team_name, [])
+        if activation.in_account_id in team_accounts:
+            team_accounts[team_accounts.index(activation.in_account_id)] = activation.out_account_id
+
+        if activation.in_account_id in pending.players:
+            idx = pending.players.index(activation.in_account_id)
+            pending.players[idx] = activation.out_account_id
+            team = self.brackets.get_team(team_name)
+            orig = next((m for m in team.mains if m.account_id == activation.out_account_id), None)
+            if orig and idx < len(pending.uuids):
+                pending.uuids[idx] = orig.device_uuid
+
+        self.players.pop(activation.in_account_id, None)
+        self.players[activation.out_account_id] = [match_key, team_name]
+
+    def activate_bench(
+        self,
+        match_key: str,
+        out_discord: str,
+        in_discord: str,
+        requested_by: str,
+        reason: str = "",
+    ) -> dict:
+        pending = self.pending_matches.get(match_key)
+        if not pending:
+            return {"ok": False, "error": "no such pending match"}
+
+        match = pending.match
+        target_team = None
+        for match_team in match.teams:
+            if not match_team.name:
+                continue
+            team = self.brackets.get_team(match_team.name)
+            if any(m.discord_id == out_discord for m in team.mains) and \
+               any(b.discord_id == in_discord for b in team.bench):
+                target_team = match_team.name
+                break
+        if not target_team:
+            return {"ok": False, "error": "both players must be on the same team"}
+
+        existing = match.bench_activations.get(target_team)
+        if existing and existing.state == "PENDING":
+            return {"ok": False, "error": "an activation is already pending"}
+
+        team = self.brackets.get_team(target_team)
+        out_member = next(m for m in team.mains if m.discord_id == out_discord)
+        in_member = next(b for b in team.bench if b.discord_id == in_discord)
+        if not in_member.device_uuid:
+            return {"ok": False, "error": "bench member hasn't verified yet"}
+
+        now = time.time()
+        activation = BenchActivationSchema(
+            team=target_team,
+            out_discord_id=out_discord,
+            out_account_id=out_member.account_id,
+            in_discord_id=in_discord,
+            in_account_id=in_member.account_id,
+            in_uuid=in_member.device_uuid,
+            requested_by=requested_by,
+            reason=reason,
+            state="PENDING",
+            at=now,
+            expires_at=now + BENCH_ACTIVATION_TIMEOUT,
+        )
+        match.bench_activations[target_team] = activation
+        self._apply_bench_activation(match_key, target_team)
+        self.brackets.save_bench_state(match)
+
+        return {
+            "ok": True,
+            "team": target_team,
+            "team_thread_id": team.thread_id,
+            "out_discord_id": out_discord,
+            "in_discord_id": in_discord,
+            "expires_at": activation.expires_at,
+        }
+
+    def resolve_bench_activation(self, match_key: str, team_name: str, action: str) -> dict:
+        pending = self.pending_matches.get(match_key)
+        if not pending:
+            return {"ok": False, "error": "no such pending match"}
+        activation = pending.match.bench_activations.get(team_name)
+        if not activation:
+            return {"ok": False, "error": "no activation found"}
+        if activation.state != "PENDING":
+            return {"ok": False, "error": f"activation already {activation.state.lower()}"}
+
+        if action == "confirm":
+            activation.state = "ACCEPTED"
+        elif action == "decline":
+            activation.state = "DECLINED"
+            self._revert_bench_activation(match_key, team_name)
+        else:
+            return {"ok": False, "error": "unknown action"}
+
+        self.brackets.save_bench_state(pending.match)
+        return {"ok": True, "state": activation.state}
+
+    def force_bench_activation(
+        self,
+        match_key: str,
+        out_discord: str,
+        in_discord: str,
+        requested_by: str,
+        reason: str = "",
+    ) -> dict:
+        pending = self.pending_matches.get(match_key)
+        if not pending:
+            return {"ok": False, "error": "no such pending match"}
+
+        match = pending.match
+        target_team = None
+        for match_team in match.teams:
+            if not match_team.name:
+                continue
+            team = self.brackets.get_team(match_team.name)
+            if any(m.discord_id == out_discord for m in team.mains) and \
+               any(b.discord_id == in_discord for b in team.bench):
+                target_team = match_team.name
+                break
+        if not target_team:
+            return {"ok": False, "error": "both players must be on the same team"}
+
+        team = self.brackets.get_team(target_team)
+        out_member = next(m for m in team.mains if m.discord_id == out_discord)
+        in_member = next(b for b in team.bench if b.discord_id == in_discord)
+        if not in_member.device_uuid:
+            return {"ok": False, "error": "bench member hasn't verified yet"}
+
+        existing = match.bench_activations.get(target_team)
+        if existing and existing.state in ("PENDING", "ACCEPTED"):
+            self._revert_bench_activation(match_key, target_team)
+
+        now = time.time()
+        activation = BenchActivationSchema(
+            team=target_team,
+            out_discord_id=out_discord,
+            out_account_id=out_member.account_id,
+            in_discord_id=in_discord,
+            in_account_id=in_member.account_id,
+            in_uuid=in_member.device_uuid,
+            requested_by=requested_by,
+            reason=reason,
+            state="FORCE",
+            at=now,
+            expires_at=0,
+        )
+        match.bench_activations[target_team] = activation
+        self._apply_bench_activation(match_key, target_team)
+        self.brackets.save_bench_state(match)
+        return {
+            "ok": True,
+            "team": target_team,
+            "team_thread_id": team.thread_id,
+            "out_discord_id": out_discord,
+            "in_discord_id": in_discord,
+        }
+
+    def expire_bench_activations(self) -> list[dict]:
+        expired = []
+        now = time.time()
+        for match_key, pending in list(self.pending_matches.items()):
+            for team_name, activation in list(pending.match.bench_activations.items()):
+                if activation.state == "PENDING" and activation.expires_at <= now:
+                    activation.state = "ACCEPTED"
+                    self.brackets.save_bench_state(pending.match)
+                    expired.append({
+                        "match_key": match_key,
+                        "team": team_name,
+                        "out_discord_id": activation.out_discord_id,
+                        "in_discord_id": activation.in_discord_id,
+                    })
+        return expired
+
+    # ---- ready ----
+
+    def _readiness_snapshot(self, match_id: str) -> dict:
+        pending = self.pending_matches[match_id]
+        ready = self.ready_players.get(match_id, set())
+
+        teams_info: dict[str, dict] = {}
+        for match_team in pending.match.teams:
+            team_name = match_team.name
+            if not team_name:
+                continue
+            team = self.brackets.get_team(team_name)
+            active_accounts = pending.teams.get(team_name, [])
+            members = []
+            for account_id in active_accounts:
+                main = next((m for m in team.mains if m.account_id == account_id), None)
+                if main:
+                    members.append({
+                        "discord_id": main.discord_id,
+                        "account_id": account_id,
+                        "ready": account_id in ready,
+                        "is_bench": False,
+                    })
+                    continue
+                bench = next((b for b in team.bench if b.account_id == account_id), None)
+                if bench:
+                    members.append({
+                        "discord_id": bench.discord_id,
+                        "account_id": account_id,
+                        "ready": account_id in ready,
+                        "is_bench": True,
+                    })
+            size = len(team.mains)
+            teams_info[team_name] = {
+                "size": size,
+                "min": max(1, size - 1),
+                "ready": sum(1 for m in members if m["ready"]),
+                "members": members,
+            }
+
+        min_total = sum(t["min"] for t in teams_info.values())
+        total_ready = sum(t["ready"] for t in teams_info.values())
+        total_players = sum(t["size"] for t in teams_info.values())
+        return {
+            "teams": teams_info,
+            "min_total": min_total,
+            "total_ready": total_ready,
+            "total_players": total_players,
+            "min_met": all(t["ready"] >= t["min"] for t in teams_info.values()),
+            "floor_met": all(t["ready"] >= 1 for t in teams_info.values()),
+        }
 
     def handle_player_ready(self, account_id: str, uuid: str) -> dict:
-        """handles the player ready event."""
         self.sync()
         match_id = self.players.get(account_id, [None, None])[0]
         if not match_id:
@@ -148,6 +399,7 @@ class Manager:
             self.active_match = match
             self.pending_matches.pop(match_id, None)
             self.ready_players.pop(match_id, None)
+            self._mark_bench_started(match_id)
             send_event(
                 "ready_panel",
                 season_id=self.season_id,
@@ -170,37 +422,24 @@ class Manager:
             "message": f"Ready: {snapshot['total_ready']}/{snapshot['min_total']}.",
         }
 
-    def _captain_account_of(self, team_name: str) -> str | None:
-        """the game account id of the team's captain, or None if unresolvable."""
-        team_schema = self.brackets.get_team(team_name)
-        if not team_schema:
-            return None
-        for member in team_schema.members:
-            if member.discord_id == team_schema.captain and member.account_id:
-                return member.account_id
-        return None
+    def _mark_bench_started(self, match_id: str) -> None:
+        """any pending activation that never got a response is accepted at start."""
+        pending = self.pending_matches.get(match_id) or self.active_match
+        if not pending:
+            return
+        for team_name, activation in pending.match.bench_activations.items():
+            if activation.state == "PENDING":
+                activation.state = "ACCEPTED"
+                self.brackets.save_bench_state(pending.match)
 
     def handle_player_pause(self, account_id: str) -> dict:
-        """only captains can request a pause, and both captains must agree."""
         if self._transitioning:
-            return {
-                "status": "error",
-                "message": "The match is ending."
-            }
-
+            return {"status": "error", "message": "The match is ending."}
         if not self.active_match:
-            return {
-                "status": "error",
-                "message": "There is no active match."
-            }
-
+            return {"status": "error", "message": "There is no active match."}
         if account_id not in self.active_match.players:
-            return {
-                "status": "error",
-                "message": "You are not a member of the active match."
-            }
+            return {"status": "error", "message": "You are not a member of the active match."}
 
-        # verify that the caller is a captain.
         captains = set()
         for team in self.active_match.match.teams:
             captain_account = self._captain_account_of(team.name)
@@ -208,48 +447,42 @@ class Manager:
                 captains.add(captain_account)
 
         if account_id not in captains:
-            return {
-                "status": "error",
-                "message": "Only the team captain can request a pause."
-            }
+            return {"status": "error", "message": "Only the team captain can request a pause."}
 
         match_id = self.active_match.key
         self.pause_players.setdefault(match_id, set())
         if account_id in self.pause_players[match_id]:
-            return {
-                "status": "error",
-                "message": "You are already marked for match pause."
-            }
+            return {"status": "error", "message": "You are already marked for match pause."}
 
         result = {"status": "success", "message": "You have been marked for match pause."}
         self.pause_players[match_id].add(account_id)
 
-        # both captains have to agree.
         if captains and captains.issubset(self.pause_players[match_id]):
             self.save_score()
-            # same as completion from here on: drop the active match and
-            # transition back to lobby. scores are saved above, so resuming
-            # via /ready picks them up again.
             self.end_tournament_session()
             result["pause"] = True
         return result
 
+    def _captain_account_of(self, team_name: str) -> str | None:
+        team_schema = self.brackets.get_team(team_name)
+        if not team_schema:
+            return None
+        for member in team_schema.mains:
+            if member.discord_id == team_schema.captain and member.account_id:
+                return member.account_id
+        return None
+
     def save_score(self) -> None:
-        """saves the score of active match in database."""
         if not self.active_match:
             return
-
         if self.active_match.match.group_id:
-            # its a group stage match.
             gs = self.brackets.read_gs()
             gs.groups[self.active_match.match.group_id].rounds[self.active_match.match.round_id].matches[self.active_match.match.match_id] = self.active_match.match
             self.brackets.commit_gs(gs)
         else:
-            # its a knockout stage match.
             self.brackets.save_match(self.active_match.match)
 
     def handle_player_leave(self, account_id: str) -> None:
-        """handles the player leaving."""
         match_id = self.players.get(account_id, [None, None])[0]
         if not match_id:
             return
@@ -267,42 +500,7 @@ class Manager:
                     snapshot=snapshot,
                 )
 
-    def _readiness_snapshot(self, match_id: str) -> dict:
-        """per-team ready counts, min thresholds, and flags for the bot panel."""
-        match = self.pending_matches[match_id]
-        ready = self.ready_players.get(match_id, set())
-        teams_info: dict[str, dict] = {}
-        for match_team in match.match.teams:
-            team_name = match_team.name
-            if not team_name:
-                continue
-            team_schema = self.brackets.get_team(team_name)
-            members = [
-                {"discord_id": m.discord_id, "ready": m.account_id in ready}
-                for m in team_schema.members
-            ]
-            size = len(members)
-            teams_info[team_name] = {
-                "size": size,
-                "min": max(1, size - 1),
-                "ready": sum(1 for m in members if m["ready"]),
-                "members": members,
-            }
-
-        min_total = sum(t["min"] for t in teams_info.values())
-        total_ready = sum(t["ready"] for t in teams_info.values())
-        total_players = sum(t["size"] for t in teams_info.values())
-        return {
-            "teams": teams_info,
-            "min_total": min_total,
-            "total_ready": total_ready,
-            "total_players": total_players,
-            "min_met": all(t["ready"] >= t["min"] for t in teams_info.values()),
-            "floor_met": all(t["ready"] >= 1 for t in teams_info.values()),
-        }
-
     def force_start_match(self, match_key: str) -> dict:
-        """starts a match at staff's request. requires one ready per team, no more."""
         match_key = str(match_key)
         if self.active_match:
             return {"started": False, "error": "A match is already active."}
@@ -316,6 +514,7 @@ class Manager:
         self.pending_matches.pop(match_key, None)
         self.ready_players.pop(match_key, None)
         self.pause_players.pop(match_key, None)
+        self._mark_bench_started(match_key)
         send_event(
             "ready_panel",
             season_id=self.season_id,
@@ -327,13 +526,11 @@ class Manager:
         return {"started": True}
 
     def conclude_active_match(self) -> None:
-        """concludes the active match."""
         if not self.active_match:
             return
 
         self.save_score()
 
-        # tell the bot the match is over, so it can close the match's thread.
         send_event(
             "match_ended",
             season_id=self.season_id,
@@ -341,9 +538,7 @@ class Manager:
         )
 
         if self.active_match.match.group_id:
-            self.brackets.update_gs_match(
-                match = self.active_match.match,
-            )
+            self.brackets.update_gs_match(match=self.active_match.match)
         else:
             self.brackets.update_match(match=self.active_match.match)
 
@@ -352,7 +547,6 @@ class Manager:
         self.end_tournament_session()
 
     def start_tournament_session(self) -> None:
-        """starts the tournament session."""
         os.environ["TOURNAMENT_MATCH"] = self.season_id
         self.brackets.announce_match_start(self.active_match.match)
         from .activity import TournamentTransitionActivity
@@ -362,7 +556,6 @@ class Manager:
             session.setactivity(bascenev1.newactivity(TournamentTransitionActivity))
 
     def end_tournament_session(self) -> None:
-        """schedules the transition back to lobby for both completion and pause."""
         if self._transitioning:
             return
         self._transitioning = True
@@ -371,12 +564,6 @@ class Manager:
             bascenev1.apptimer(30.0, self._return_to_lobby)
 
     def _return_to_lobby(self) -> None:
-        """pops the tournament env and transitions back to a regular session.
-
-        only the concluded match's state is removed. other pending matches keep
-        their player assignments and ready state, so a player who was already
-        ready for their upcoming match does not need to /ready again.
-        """
         from tournament.session import TournamentSession
 
         self._transitioning = False
@@ -385,14 +572,11 @@ class Manager:
         if self.active_match:
             match_id = self.active_match.key
 
-            # remove only THIS match's players from the account -> match map.
-            # other pending matches keep their player assignments.
             for account_id in [
                 aid for aid, (mid, _) in self.players.items() if mid == match_id
             ]:
                 del self.players[account_id]
 
-            # drop this match's per-match entries. other matches keep theirs.
             self.pending_matches.pop(match_id, None)
             self.ready_players.pop(match_id, None)
             self.pause_players.pop(match_id, None)

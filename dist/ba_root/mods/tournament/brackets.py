@@ -384,6 +384,7 @@ class Brackets(Storage):
             slot.score, slot.series = played.score, played.series
         stored.winner_idx, stored.loser_idx = match.winner_idx, match.loser_idx
         stored.last_scores = match.last_scores
+        stored.bench_activations = {}
         stored.status = Status.COMPLETED
         match.status = Status.COMPLETED
 
@@ -412,6 +413,18 @@ class Brackets(Storage):
         for slot, played in zip(stored.teams, match.teams):
             slot.score, slot.series = played.score, played.series
         stored.last_scores = match.last_scores
+        self.commit_stage(stage, before)
+
+    def save_bench_state(self, match: MatchSchema) -> None:
+        """persists the bench activation state for a match."""
+        if match.group_id:
+            gs = self.read_gs()
+            gs.groups[match.group_id].rounds[match.round_id].matches[match.match_id].bench_activations = match.bench_activations
+            self.commit_gs(gs)
+            return
+        stage = self.read_stage()
+        before = self.snapshot(stage)
+        stage[match.bracket][match.round_id].matches[match.match_id].bench_activations = match.bench_activations
         self.commit_stage(stage, before)
 
     def recalculate_group_standings(self, group: GroupSchema) -> None:

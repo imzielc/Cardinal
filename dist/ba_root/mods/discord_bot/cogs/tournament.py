@@ -152,6 +152,10 @@ class TournamentCommands(
             from tournament.ready_panels import ready_panels
 
             ready_panels.clear_season(season_id)
+            
+            from tournament.bench_panels import bench_panels
+
+            bench_panels.clear_season(season_id)
 
             seasons.cancel_season(season_id)
             cancelled = await asyncio.to_thread(posts.cancel_season, season_id)
@@ -1006,3 +1010,251 @@ class TournamentCommands(
         seasons.update_season(season_id=seasons.active_season, season=season)
 
         await refresh_register_panel(self.bot)
+
+    @app_commands.command(name="bench-add")
+    @app_commands.describe(user="The user to add to your team's bench")
+    async def bench_add(self, interaction: Interaction, user: discord.Member) -> None:
+        """adds a bench member to your team. captain only."""
+        season_id = seasons.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing.", ephemeral=True
+            )
+            return
+        registration = Registration(season_id=season_id)
+        team = registration.team_of(str(interaction.user.id))
+        if not team or team.captain != str(interaction.user.id):
+            await interaction.response.send_message(
+                "Only the captain can add bench members.", ephemeral=True
+            )
+            return
+        if user.bot:
+            await interaction.response.send_message("Bots can't play.", ephemeral=True)
+            return
+        result = registration.add_bench(team.id, str(user.id))
+        if result is True:
+            await interaction.response.send_message(
+                f"Added {user.mention} to {team.id}'s bench. They'll need to run /verify in-game.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"Could not add: {result}.", ephemeral=True
+        )
+
+    @app_commands.command(name="bench-remove")
+    @app_commands.describe(user="The bench member to remove")
+    async def bench_remove(self, interaction: Interaction, user: discord.Member) -> None:
+        """removes a bench member. captain only."""
+        season_id = seasons.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing.", ephemeral=True
+            )
+            return
+        registration = Registration(season_id=season_id)
+        team = registration.team_of(str(interaction.user.id))
+        if not team or team.captain != str(interaction.user.id):
+            await interaction.response.send_message(
+                "Only the captain can remove bench members.", ephemeral=True
+            )
+            return
+        ok = registration.remove_bench(team.id, str(user.id))
+        await interaction.response.send_message(
+            "Removed." if ok else "Could not remove.", ephemeral=True
+        )
+
+    @app_commands.command(name="bench-activate")
+    @app_commands.describe(
+        match_index="The match number from /tournament list",
+        out_member="The main being replaced",
+        bench_member="The bench member stepping in",
+        reason="Optional reason",
+    )
+    async def bench_activate(
+        self,
+        interaction: Interaction,
+        match_index: int,
+        out_member: discord.Member,
+        bench_member: discord.Member,
+        reason: str = "",
+    ) -> None:
+        """requests a bench activation for one match. captain only."""
+        season_id = seasons.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing.", ephemeral=True
+            )
+            return
+        registration = Registration(season_id=season_id)
+        team = registration.team_of(str(interaction.user.id))
+        if not team or team.captain != str(interaction.user.id):
+            await interaction.response.send_message(
+                "Only the captain can activate a bench member.", ephemeral=True
+            )
+            return
+
+        from tournament.brackets import Brackets
+        brackets = Brackets(season_id=season_id)
+        matches = brackets.list_matches()
+        match_ids = list(matches.keys())
+        if match_index < 1 or match_index > len(match_ids):
+            await interaction.response.send_message(
+                f"Invalid match index. Must be 1-{len(match_ids)}.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await GameClient().send_action(
+                "activate_bench",
+                match_key=match_ids[match_index - 1],
+                out_discord=str(out_member.id),
+                in_discord=str(bench_member.id),
+                requested_by=str(interaction.user.id),
+                reason=reason,
+                response=True,
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Failed to send: {e}", ephemeral=True)
+            return
+
+        if result is None:
+            await interaction.followup.send(
+                "The game didn't respond. Try /tournament list in a moment.",
+                ephemeral=True,
+            )
+            return
+        if not result.get("ok"):
+            await interaction.followup.send(
+                f"Could not activate: {result.get('error', 'unknown')}.", ephemeral=True
+            )
+            return
+        await interaction.followup.send(
+            f"Activation posted to {team.id}'s thread. "
+            f"{out_member.mention} has 6 hours to respond.", ephemeral=True
+        )
+
+    @app_commands.command(name="bench-force")
+    @app_commands.describe(
+        match_index="The match number from /tournament list",
+        out_member="The main being replaced",
+        bench_member="The bench member stepping in",
+        reason="Optional reason",
+    )
+    @require(Authority.LEADER)
+    async def bench_force(
+        self,
+        interaction: Interaction,
+        match_index: int,
+        out_member: discord.Member,
+        bench_member: discord.Member,
+        reason: str = "",
+    ) -> None:
+        """forces a bench activation, overriding a decline. staff only."""
+        season_id = seasons.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing.", ephemeral=True
+            )
+            return
+
+        from tournament.brackets import Brackets
+        brackets = Brackets(season_id=season_id)
+        matches = brackets.list_matches()
+        match_ids = list(matches.keys())
+        if match_index < 1 or match_index > len(match_ids):
+            await interaction.response.send_message(
+                f"Invalid match index. Must be 1-{len(match_ids)}.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await GameClient().send_action(
+                "force_bench",
+                match_key=match_ids[match_index - 1],
+                out_discord=str(out_member.id),
+                in_discord=str(bench_member.id),
+                requested_by=str(interaction.user.id),
+                reason=reason,
+                response=True,
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Failed to send: {e}", ephemeral=True)
+            return
+
+        if result is None:
+            await interaction.followup.send("The game didn't respond.", ephemeral=True)
+            return
+        if not result.get("ok"):
+            await interaction.followup.send(
+                f"Could not force: {result.get('error', 'unknown')}.", ephemeral=True
+            )
+            return
+        await interaction.followup.send("Forced.", ephemeral=True)
+
+    @app_commands.command(name="swap")
+    @app_commands.describe(
+        out_member="The current team member leaving",
+        in_member="The replacement",
+        in_account_id="The replacement's game account id",
+        reason="Why the swap is happening",
+    )
+    @require(Authority.LEADER)
+    async def swap(
+        self,
+        interaction: Interaction,
+        out_member: discord.Member,
+        in_member: discord.Member,
+        in_account_id: str,
+        reason: str = "",
+    ) -> None:
+        """opens a community vote to replace a team member for the rest of the season."""
+        season_id = seasons.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing.", ephemeral=True
+            )
+            return
+
+        registration = Registration(season_id=season_id)
+        team = registration.team_of(str(out_member.id))
+        if not team:
+            await interaction.response.send_message(
+                f"{out_member.mention} is not on a team.", ephemeral=True
+            )
+            return
+        if registration.is_registered(str(in_member.id)):
+            await interaction.response.send_message(
+                f"{in_member.mention} is already registered this season.", ephemeral=True
+            )
+            return
+
+        from server.notify import send_event
+        from tournament.votes import Votes
+
+        try:
+            hours = float(config.discord.get("perm_vote_hours", 48))
+        except (TypeError, ValueError):
+            hours = 48.0
+
+        votes_store = Votes(season_id)
+        vote = votes_store.open(
+            team_id=team.id,
+            out_discord_id=str(out_member.id),
+            in_discord_id=str(in_member.id),
+            in_account_id=in_account_id.strip(),
+            requested_by=str(interaction.user.id),
+            reason=reason,
+            duration_seconds=hours * 3600,
+        )
+        send_event(
+            "swap_vote_opened",
+            season_id=season_id,
+            vote_id=vote.id,
+        )
+        await interaction.response.send_message(
+            f"Vote opened for team {team.id}. Closes in {int(hours)} hours.",
+            ephemeral=True,
+        )

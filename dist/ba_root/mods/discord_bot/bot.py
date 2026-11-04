@@ -4,25 +4,32 @@ import asyncio
 import logging
 from traceback import format_exc
 
-from discord import Activity, ActivityType, Intents, Interaction, NotFound, app_commands
+from discord import Activity, ActivityType, Intents, Interaction, app_commands
 from discord.ext import commands
 
 from discord_bot.cogs.account import AccountCommands
 from discord_bot.cogs.config import ConfigCommands
 from discord_bot.cogs.general import GeneralCommands
 from discord_bot.cogs.watcher import TeamInvitationWatcher
-from discord_bot.cogs.scheduler import RoundScheduler
+from discord_bot.cogs.scheduler import MaintenanceScheduler, RoundScheduler
 from discord_bot.cogs.tournament import TournamentCommands
-from discord_bot.events import EventReceiver, _delete_thread, on_round_started
+from discord_bot.events import EventReceiver
 from discord_bot.held_posts import HeldPosts
-from discord_bot.ui import RegisterView, TeamInvitationView, ReadyPanelView
-from tournament.ready_panels import ready_panels
+from discord_bot.ui import (
+    BenchPanelView,
+    ReadyPanelView,
+    RegisterView,
+    SwapVoteView,
+    TeamInvitationView,
+)
 from server import config
 from server.enums import TeamStatus
 from tournament import seasons
-from tournament.brackets import Brackets
-from tournament.match_threads import match_threads
+from tournament.bench_panels import bench_panels
+from tournament.ready_panels import ready_panels
 from tournament.registration import Registration
+from tournament.votes import Votes
+
 
 class DiscordBot(commands.Bot):
     def __init__(self) -> None:
@@ -34,14 +41,13 @@ class DiscordBot(commands.Bot):
             owner_id=config.discord.owner_id,
         )
         self._events: EventReceiver | None = None
-        self._reconciled: bool = False
-    
+
     async def setup_hook(self) -> None:
         self._restore_invitations()
         self._restore_ready_panels()
-        # the registration panel's button must keep working after a restart.
+        self._restore_bench_panels()
+        self._restore_swap_votes()
         self.add_view(RegisterView())
-        # start listening for game-side events.
         self._events = EventReceiver(self, asyncio.get_running_loop())
         self._events.start()
         self.tree.on_error = self.on_app_cmd_error
@@ -52,50 +58,9 @@ class DiscordBot(commands.Bot):
         await self.add_cog(HeldPosts(self))
         await self.add_cog(TeamInvitationWatcher(self))
         await self.add_cog(RoundScheduler(self))
-
-    async def _reconcile_threads(self) -> None:
-        """brings match_threads back in sync with the season's live matches.
-
-        deletes threads whose match is gone, creates threads for live matches
-        that have none. best-effort: any failure leaves state untouched.
-        """
-        season_id = str(seasons.active_season)
-        if not int(season_id):
-            return
-        try:
-            brackets = Brackets(season_id=season_id)
-            if not brackets.read_meta().started:
-                return
-            live = brackets.list_matches()
-            payload = brackets._build_round_payload([])
-        except Exception:
-            return
-
-        live_keys = set(live.keys())
-        tracked = match_threads.get(season_id)
-
-        kept: dict[str, int] = {}
-        for key, tid in tracked.items():
-            if key not in live_keys:
-                await _delete_thread(self, tid)
-                continue
-            try:
-                await self.fetch_channel(int(tid))
-            except NotFound:
-                continue
-            except Exception:
-                kept[key] = tid
-                continue
-            kept[key] = tid
-        if kept != tracked:
-            match_threads.set(season_id, kept)
-
-        missing = [m for m in payload if m["key"] not in kept]
-        if missing:
-            await on_round_started(self, {"season_id": season_id, "matches": missing})
+        await self.add_cog(MaintenanceScheduler(self))
 
     def _restore_invitations(self) -> None:
-        """re-registers the invitation buttons of the pending teams, so they work after a restart."""
         season_id = seasons.active_season
         if not int(season_id):
             return
@@ -105,7 +70,6 @@ class DiscordBot(commands.Bot):
                 self.add_view(TeamInvitationView(team_id=team_id, season_id=season_id))
 
     def _restore_ready_panels(self) -> None:
-        """re-registers the ready panel buttons that survived a restart."""
         season_id = str(seasons.active_season)
         if not int(season_id):
             return
@@ -117,6 +81,28 @@ class DiscordBot(commands.Bot):
                     can_force=bool(entry.get("can_force", False)),
                 )
             )
+
+    def _restore_bench_panels(self) -> None:
+        season_id = str(seasons.active_season)
+        if not int(season_id):
+            return
+        for match_key, team, entry in bench_panels.items(season_id):
+            self.add_view(
+                BenchPanelView(
+                    season_id,
+                    match_key,
+                    team,
+                    out_discord_id=str(entry.get("out_discord_id") or ""),
+                )
+            )
+
+    def _restore_swap_votes(self) -> None:
+        season_id = str(seasons.active_season)
+        if not int(season_id):
+            return
+        for vote in Votes(season_id).open_votes():
+            if vote.message_id:
+                self.add_view(SwapVoteView(season_id, vote.id, vote.team_id))
 
     async def on_app_cmd_error(
         self, interaction: Interaction, error: app_commands.AppCommandError
@@ -135,15 +121,7 @@ class DiscordBot(commands.Bot):
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
 
-        if not self._reconciled:
-            try:
-                await self._reconcile_threads()
-                self._reconciled = True
-            except Exception:
-                print(f"Discord: thread reconciliation failed:\n{format_exc()}")
-
     async def close(self) -> None:
-        """stop the event listener before the bot shuts down."""
         if self._events:
             self._events.shutdown()
             self._events = None
