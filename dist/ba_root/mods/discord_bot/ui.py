@@ -294,12 +294,12 @@ class RegisterView(ui.LayoutView):
             series_str = season.series.value.replace("_", " ").title()
             mode_str = season.mode.value.replace("_", " ").title()
 
-            total, verified = 0, 0
+            total, registered = 0, 0
             try:
                 reg = Registration(season_id=season_id).read()
                 total = len(reg.teams)
-                verified = sum(
-                    1 for t in reg.teams.values() if t.status == TeamStatus.VERIFIED
+                registered = sum(
+                    1 for t in reg.teams.values() if t.status == TeamStatus.REGISTERED
                 )
             except Exception:
                 pass
@@ -315,7 +315,7 @@ class RegisterView(ui.LayoutView):
                     f"**Season** `{season_id}`\n"
                     f"**Format** {type_str} • {series_str}\n"
                     f"**Mode** {mode_str}\n"
-                    f"**Teams** {total} registered • {verified} verified\n"
+                    f"**Teams** {total} total • {registered} registered\n"
                     f"**Waitlist** {waitlist_count} queued"
                 )
             )
@@ -539,7 +539,7 @@ class SoloRegistrationModal(ui.Modal, title="Tournament Solo Registration."):
         if role:
             await interaction.user.add_roles(role)
         await interaction.response.send_message(
-            f"You're registered as **{self.team_name.value}**! Join the game and run `/verify` to finish.",
+            f"You're registered as **{self.team_name.value}**! Your device is captured on your first `/ready` in-game.",
             ephemeral=True,
         )
         await refresh_register_panel(interaction.client)
@@ -721,7 +721,7 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
 
         await interaction.followup.send(
             f"Team **{self.team_name.value}** created! "
-            f"Teammates must accept the invite, then everyone runs `/verify` in-game.",
+            f"Teammates must accept the invite. Devices are captured on the first `/ready` in-game.",
             ephemeral=True,
         )
         await refresh_register_panel(interaction.client)
@@ -733,10 +733,9 @@ class CaptainRegistrationModal(ui.Modal, title="Tournament Team Registration."):
 class TeamInvitationView(ui.LayoutView):
     """accept or reject a team invitation, rendered with components v2.
 
-    three states, driven by the team's data:
-      - IN_INVITATION   -- not everyone has accepted. buttons enabled.
-      - UNVERIFIED      -- everyone accepted. buttons disabled, per-member verify shown.
-      - VERIFIED        -- everyone verified. no buttons at all, view is final.
+    two states, driven by the team's data:
+      - IN_INVITATION -- not everyone has accepted. buttons enabled.
+      - REGISTERED    -- everyone accepted. no buttons at all, view is final.
     """
 
     def __init__(self, team_id: str, invite_text: str = "", season_id: str = ""):
@@ -904,9 +903,9 @@ class TeamInvitationView(ui.LayoutView):
             )
             return
 
-        if team.status == TeamStatus.VERIFIED:
+        if team.status == TeamStatus.REGISTERED:
             await interaction.response.send_message(
-                "Your team is already verified.", ephemeral=True
+                "Your team is already registered.", ephemeral=True
             )
             return
 
@@ -942,7 +941,7 @@ class TeamInvitationView(ui.LayoutView):
                 pass
 
         await interaction.response.send_message(
-            "You've joined the team! Run `/verify` in the game to finish.",
+            "You've joined the team! Your device is captured on your first `/ready` in-game.",
             ephemeral=True,
         )
         await self._edit_interaction_message(interaction)
@@ -973,9 +972,9 @@ class TeamInvitationView(ui.LayoutView):
             )
             return
 
-        if team.status == TeamStatus.VERIFIED:
+        if team.status == TeamStatus.REGISTERED:
             await interaction.response.send_message(
-                "Your team is already verified. Contact an admin if something needs to change.",
+                "Your team is already registered. Contact an admin if something needs to change.",
                 ephemeral=True,
             )
             return
@@ -1056,7 +1055,7 @@ class ReadyPanelView(ui.View):
                 content=f"{interaction.message.content}\n\n*Started by {interaction.user.mention}.*",
                 view=None,
             )
-            from tournament.ready_panels import ready_panels
+            from tournament.panels import ready_panels
 
             ready_panels.remove(self.season_id, self.match_key)
             return
@@ -1099,7 +1098,7 @@ class BenchPanelView(ui.View):
 
     async def _decline(self, interaction: Interaction) -> None:
         from discord_bot.client import GameClient
-        from tournament.bench_panels import bench_panels
+        from tournament.panels import bench_panels
 
         await interaction.response.defer()
         result = await GameClient().send_action(
@@ -1122,7 +1121,7 @@ class BenchPanelView(ui.View):
 
     async def _confirm(self, interaction: Interaction) -> None:
         from discord_bot.client import GameClient
-        from tournament.bench_panels import bench_panels
+        from tournament.panels import bench_panels
 
         await interaction.response.defer()
         result = await GameClient().send_action(

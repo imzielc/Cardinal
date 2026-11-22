@@ -4,18 +4,14 @@ from enum import IntEnum, StrEnum
 
 
 class Authority(IntEnum):
-    """enum class for authority levels."""
-
     USER = 0
     WHITELIST = 1
     ADMIN = 2
     LEADER = 3
-    HOST = 10  # for server.
+    HOST = 10
 
 
 class Role(StrEnum):
-    """enum class for roles."""
-
     LEADER = "leaders"
     ADMIN = "admins"
     WHITELIST = "whitelist"
@@ -23,26 +19,17 @@ class Role(StrEnum):
 
 
 class Utility(StrEnum):
-    """enum class for utilities."""
-
     WHITELIST = "whitelist"
     SPECTATOR = "spectator"
     POWERUPS = "powerups"
 
 
 class Playlist(IntEnum):
-    """enum class for playlists."""
-
     TEAMS = 624678
     FFA = 617193
 
 
-################# Tournament Enums ####################
-
-
 class TournamentStage(StrEnum):
-    """enum class for tournament stages."""
-
     NONE = "NONE"
     REGISTRATION = "REGISTRATION"
     IN_PROGRESS = "IN_PROGRESS"
@@ -58,14 +45,12 @@ class TournamentType(StrEnum):
 
     @property
     def count(self) -> int:
-        """Returns the max count of players for a team"""
-        mapping = {
+        return {
             TournamentType.SOLO: 1,
             TournamentType.DUO: 2,
             TournamentType.TRIO: 3,
             TournamentType.SQUAD: 4,
-        }
-        return mapping[self]
+        }[self]
 
 
 class SeriesType(StrEnum):
@@ -76,19 +61,15 @@ class SeriesType(StrEnum):
 
     @property
     def count(self) -> int:
-        """Returns the count of series needed for a team to win the match"""
-        mapping = {
+        return {
             SeriesType.BO1: 1,
             SeriesType.BO3: 2,
             SeriesType.BO5: 3,
             SeriesType.BO7: 4,
-        }
-        return mapping[self]
+        }[self]
 
 
 class TournamentMode(StrEnum):
-    """how the teams are knocked out."""
-
     SINGLE = "SINGLE_ELIMINATION"
     DOUBLE = "DOUBLE_ELIMINATION"
 
@@ -101,5 +82,4 @@ class Status(StrEnum):
 
 class TeamStatus(StrEnum):
     IN_INVITATION = "IN_INVITATION"
-    UNVERIFIED = "UNVERIFIED"
-    VERIFIED = "VERIFIED"
+    REGISTERED = "REGISTERED"

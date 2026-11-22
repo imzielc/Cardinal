@@ -427,6 +427,48 @@ class Brackets(Storage):
         stage[match.bracket][match.round_id].matches[match.match_id].bench_activations = match.bench_activations
         self.commit_stage(stage, before)
 
+    def team_active_match(self, team_name: str) -> tuple[str | None, str]:
+        """returns (match_key, state). state is 'playable', 'completed', or 'none'.
+
+        'playable' means a match the team can start right now. 'completed' means
+        their current-round match is done but the round hasn't advanced yet.
+        """
+        if not team_name:
+            return None, "none"
+
+        for key, m in self.list_matches().items():
+            if any(t.name == team_name for t in m.teams):
+                return key, "playable"
+
+        brackets = self.read_meta()
+
+        if "group-stage" in brackets.active_rounds:
+            try:
+                gs = self.read_gs()
+            except Exception:
+                return None, "none"
+            for group in gs.groups.values():
+                for round_data in group.rounds.values():
+                    if round_data.status != Status.IN_PROGRESS:
+                        continue
+                    for m in round_data.matches.values():
+                        if any(t.name == team_name for t in m.teams):
+                            return None, "completed"
+            return None, "none"
+
+        try:
+            stage = self.read_stage()
+        except Exception:
+            return None, "none"
+        for bracket_name, rounds in stage.items():
+            for rid, round_data in rounds.items():
+                if f"{bracket_name}/{rid}" not in brackets.active_rounds:
+                    continue
+                for m in round_data.matches.values():
+                    if any(t.name == team_name for t in m.teams):
+                        return None, "completed"
+        return None, "none"
+
     def recalculate_group_standings(self, group: GroupSchema) -> None:
         """recalculates the group standings based on points, diff, and rounds won."""
         stats = {}

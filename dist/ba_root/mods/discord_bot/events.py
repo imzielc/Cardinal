@@ -628,7 +628,7 @@ async def on_tournament_completed(bot: commands.Bot, payload: dict) -> None:
         return
     await cleanup_season(bot, season_id)
     await refresh_register_panel(bot)
-    from tournament.ready_panels import ready_panels
+    from tournament.panels import ready_panels
 
     ready_panels.clear_season(season_id)
 
@@ -657,7 +657,7 @@ async def on_match_announcement(bot: commands.Bot, payload: dict) -> None:
 
 async def on_ready_panel(bot: commands.Bot, payload: dict) -> None:
     from tournament import posts
-    from tournament.ready_panels import ready_panels
+    from tournament.panels import ready_panels, bench_panels
     from discord_bot.ui import ReadyPanelView
 
     season_id = str(payload.get("season_id") or "")
@@ -674,7 +674,6 @@ async def on_ready_panel(bot: commands.Bot, payload: dict) -> None:
             )
             ready_panels.remove(season_id, match_key)
 
-        from tournament.bench_panels import bench_panels
         for bkey, bteam, bentry in list(bench_panels.items(season_id)):
             if bkey != match_key:
                 continue
@@ -730,7 +729,7 @@ async def on_ready_panel(bot: commands.Bot, payload: dict) -> None:
     ready_panels.set(season_id, match_key, message.id, channel_id, can_force)
 
 async def on_bench_activation(bot: commands.Bot, payload: dict) -> None:
-    from tournament.bench_panels import bench_panels
+    from tournament.panels import bench_panels
 
     season_id = str(payload.get("season_id") or "")
     match_key = str(payload.get("match_key") or "")
@@ -751,7 +750,8 @@ async def on_bench_activation(bot: commands.Bot, payload: dict) -> None:
     content = (
         f"**Substitution request**\n\n"
         f"<@{out_discord}> — your captain wants <@{in_discord}> to stand in for you this match.\n"
-        f"Click below. If you don't answer within 6 hours, the substitution goes through."
+        f"Click below. If you don't answer within 6 hours, the substitution goes through.\n"
+        f"Once replaced, you're eligible to be activated as a stand-in if another main can't make it."
     )
     view = BenchPanelView(season_id, match_key, team, out_discord)
     try:
@@ -766,6 +766,45 @@ async def on_bench_activation(bot: commands.Bot, payload: dict) -> None:
     except Exception:
         return
     bench_panels.set(season_id, match_key, team, message.id, team_thread_id, out_discord)
+
+
+async def on_bench_activated(bot: commands.Bot, payload: dict) -> None:
+    """posts a settled substitution to the match thread so both teams can see it."""
+    from tournament.match_threads import match_threads
+
+    season_id = str(payload.get("season_id") or "")
+    match_key = str(payload.get("match_key") or "")
+    out_discord = str(payload.get("out_discord_id") or "")
+    in_discord = str(payload.get("in_discord_id") or "")
+    forced = bool(payload.get("forced"))
+    if not (season_id and match_key and out_discord and in_discord):
+        return
+
+    thread_id = match_threads.get(season_id).get(match_key, 0)
+    if not thread_id:
+        return
+    try:
+        thread = bot.get_channel(thread_id) or await bot.fetch_channel(thread_id)
+    except Exception:
+        return
+    if thread is None:
+        return
+
+    prefix = "Staff-forced substitution. " if forced else ""
+    content = (
+        f"{prefix}<@{in_discord}> is standing in for <@{out_discord}> this match. "
+        f"<@{out_discord}> is now eligible to be activated as a stand-in if another main can't make it."
+    )
+    try:
+        await thread.send(
+            content,
+            allowed_mentions=discord.AllowedMentions(
+                users=[discord.Object(id=int(in_discord)), discord.Object(id=int(out_discord))],
+                roles=False, everyone=False,
+            ),
+        )
+    except Exception:
+        return
 
 
 async def on_swap_vote_opened(bot: commands.Bot, payload: dict) -> None:
@@ -849,7 +888,7 @@ async def on_swap_vote_closed(bot: commands.Bot, payload: dict) -> None:
         footer = (
             f"**Passed.** {vote.team_id} — <@{vote.out_discord_id}> out, "
             f"<@{vote.in_discord_id}> in. {yes} approve, {no} reject.\n"
-            f"The new member needs to run /verify in-game."
+            f"The new member's device is captured on their first /ready in-game."
         )
     else:
         footer = (
@@ -869,6 +908,7 @@ HANDLERS = {
     "match_announcement": on_match_announcement,
     "ready_panel": on_ready_panel,
     "bench_activation": on_bench_activation,
+    "bench_activated": on_bench_activated,
     "swap_vote_opened": on_swap_vote_opened,
     "swap_vote_closed": on_swap_vote_closed,
 }

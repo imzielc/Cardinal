@@ -149,12 +149,9 @@ class TournamentCommands(
 
             await cleanup_season(self.bot, season_id)
             
-            from tournament.ready_panels import ready_panels
+            from tournament.panels import bench_panels, ready_panels
 
             ready_panels.clear_season(season_id)
-            
-            from tournament.bench_panels import bench_panels
-
             bench_panels.clear_season(season_id)
 
             seasons.cancel_season(season_id)
@@ -307,137 +304,6 @@ class TournamentCommands(
                 pass
 
     @app_commands.command(name="leave")
-    async def leave_team(self, interaction: Interaction) -> None:
-        """leaves your team. if you're the captain, the whole team is dissolved."""
-        season_id = seasons.active_season
-        if not int(season_id):
-            await interaction.response.send_message(
-                "There is no tournament ongoing.", ephemeral=True
-            )
-            return
-
-        registration = Registration(season_id=season_id)
-        team = registration.team_of(str(interaction.user.id))
-        if not team:
-            await interaction.response.send_message(
-                "You're not on a team.", ephemeral=True
-            )
-            return
-
-        season = seasons.get_season(season_id)
-        if season and season.stage not in (
-            TournamentStage.NONE,
-            TournamentStage.REGISTRATION,
-        ):
-            await interaction.response.send_message(
-                "The tournament has already started, you can't leave now.",
-                ephemeral=True,
-            )
-            return
-
-        is_captain = team.captain == str(interaction.user.id)
-        if is_captain:
-            prompt = (
-                f"You're the captain of **{team.id}**. Leaving will dissolve the whole "
-                f"team and remove every member. Are you sure?"
-            )
-        else:
-            prompt = f"Leave **{team.id}**?"
-
-        async def confirmed(confirm_interaction: Interaction) -> None:
-            current = Registration(season_id=season_id).get_team(team.id)
-            if not current:
-                await confirm_interaction.response.edit_message(
-                    content="That team is no longer there.", view=None
-                )
-                return
-
-            await confirm_interaction.response.edit_message(
-                content="Working...", view=None
-            )
-
-            role = participant_role(interaction.guild, season_id)
-            thread = await self._get_thread(current.thread_id)
-
-            if is_captain:
-                members = list(current.members)
-                Registration(season_id=season_id).delete(team.id)
-
-                for member in members:
-                    try:
-                        user = interaction.guild.get_member(int(member.discord_id))
-                    except (TypeError, ValueError):
-                        continue
-                    if user is None:
-                        continue
-                    if role and role in user.roles:
-                        try:
-                            await user.remove_roles(role)
-                        except discord.HTTPException:
-                            pass
-
-                if current.role_id:
-                    try:
-                        team_role = interaction.guild.get_role(current.role_id)
-                        if team_role:
-                            await team_role.delete()
-                    except discord.HTTPException:
-                        pass
-
-                if thread is not None:
-                    try:
-                        await thread.send(
-                            f"**{team.id}** was dissolved by the captain."
-                        )
-                        await thread.edit(archived=True, locked=True)
-                    except discord.HTTPException:
-                        pass
-
-                await confirm_interaction.followup.send(
-                    f"Team **{team.id}** dissolved.", ephemeral=True
-                )
-
-                await promote_waitlist_one(self.bot, season_id)
-            else:
-                updated = Registration(season_id=season_id).leave(
-                    str(interaction.user.id)
-                )
-
-                if role and role in interaction.user.roles:
-                    try:
-                        await interaction.user.remove_roles(role)
-                    except discord.HTTPException:
-                        pass
-
-                if current.role_id:
-                    try:
-                        team_role = interaction.guild.get_role(current.role_id)
-                        if team_role and team_role in interaction.user.roles:
-                            await interaction.user.remove_roles(team_role)
-                    except discord.HTTPException:
-                        pass
-
-                if thread is not None and updated is not None:
-                    try:
-                        await thread.send(
-                            f"<@{updated.captain}> {interaction.user.mention} left the team."
-                        )
-                    except discord.HTTPException:
-                        pass
-
-                await confirm_interaction.followup.send(
-                    f"You left **{team.id}**.", ephemeral=True
-                )
-
-            await refresh_register_panel(self.bot)
-
-        view = ConfirmView(
-            interaction.user.id,
-            confirmed,
-            confirm_label="Yes, leave",
-            abort_text="You're still on the team.",
-        )
-        await interaction.response.send_message(prompt, view=view, ephemeral=True)    @app_commands.command(name="leave")
     async def leave_team(self, interaction: Interaction) -> None:
         """leaves your team. if you're the captain, the whole team is dissolved."""
         season_id = seasons.active_season
@@ -755,30 +621,6 @@ class TournamentCommands(
         )
         await refresh_register_panel(self.bot)
 
-    @app_commands.command(name="uuid")
-    @require(Authority.LEADER)
-    async def change_uuid(
-        self, interaction: Interaction, user: discord.Member, uuid: str
-    ) -> None:
-        """changes the uuid of the registered player"""
-        if not int(seasons.active_season):
-            await interaction.response.send_message(
-                "There is no tournament season opened currently.", ephemeral=True
-            )
-            return
-
-        registration = Registration(season_id=seasons.active_season)
-        if not registration.is_registered(str(user.id)):
-            await interaction.response.send_message(
-                "He is not registered.", ephemeral=True
-            )
-            return
-
-        registration.change_uuid(discord_id=str(user.id), new_uuid=uuid)
-        await interaction.response.send_message(
-            f"Changed the uuid of {user.mention}'s account."
-        )
-
     @app_commands.command(name="win")
     @require(Authority.LEADER)
     async def give_win(self, interaction: Interaction, match_index: int, team_index: int) -> None:
@@ -839,26 +681,24 @@ class TournamentCommands(
             return
 
         total = len(registration.teams)
-        verified = sum(
-            1 for t in registration.teams.values() if t.status == TeamStatus.VERIFIED
+        registered = sum(
+            1 for t in registration.teams.values() if t.status == TeamStatus.REGISTERED
         )
 
-        lines = [f"**Registered teams** — {total} total ({verified} verified)\n"]
+        lines = [f"**Teams** — {total} total ({registered} registered)\n"]
 
         for team in registration.teams.values():
             joined = sum(1 for m in team.members if m.accepted)
             total_members = len(team.members)
 
-            if team.status == TeamStatus.VERIFIED:
-                status = "verified"
-            elif team.status == TeamStatus.UNVERIFIED:
-                status = f"unverified · {joined}/{total_members} joined"
+            if team.status == TeamStatus.REGISTERED:
+                status = "registered"
             else:
                 status = f"invitation · {joined}/{total_members} joined"
 
             parts = [f"**{team.id}**", f"`{status}`"]
 
-            if team.expires_at > 0 and team.status != TeamStatus.VERIFIED:
+            if team.expires_at > 0 and team.status != TeamStatus.REGISTERED:
                 parts.append(_expiry_label(team.expires_at))
 
             if team.role_id:
@@ -945,12 +785,12 @@ class TournamentCommands(
         teams = [
             team_id
             for team_id, team in registration.teams.items()
-            if team.status == TeamStatus.VERIFIED
+            if team.status == TeamStatus.REGISTERED
         ]
         skipped = [team_id for team_id in registration.teams if team_id not in teams]
         if skipped:
             await interaction.followup.send(
-                f"The following teams have not been verified yet: {', '.join(skipped)}",
+                f"The following teams have not registered yet: {', '.join(skipped)}",
                 ephemeral=True,
             )
             return
@@ -1034,9 +874,21 @@ class TournamentCommands(
         result = registration.add_bench(team.id, str(user.id))
         if result is True:
             await interaction.response.send_message(
-                f"Added {user.mention} to {team.id}'s bench. They'll need to run /verify in-game.",
+                f"Added {user.mention} to {team.id}'s bench. Their device is captured on their first /ready in-game.",
                 ephemeral=True,
             )
+            thread = await self._get_thread(team.thread_id)
+            if thread:
+                try:
+                    await thread.send(
+                        f"{user.mention} was added to the bench by {interaction.user.mention}. "
+                        f"They can be activated to stand in for a main during a match.",
+                        allowed_mentions=discord.AllowedMentions(
+                            users=[user, interaction.user], roles=False, everyone=False
+                        ),
+                    )
+                except discord.HTTPException:
+                    pass
             return
         await interaction.response.send_message(
             f"Could not add: {result}.", ephemeral=True
@@ -1063,10 +915,21 @@ class TournamentCommands(
         await interaction.response.send_message(
             "Removed." if ok else "Could not remove.", ephemeral=True
         )
+        if ok:
+            thread = await self._get_thread(team.thread_id)
+            if thread:
+                try:
+                    await thread.send(
+                        f"{user.mention} was removed from the bench by {interaction.user.mention}.",
+                        allowed_mentions=discord.AllowedMentions(
+                            users=[user, interaction.user], roles=False, everyone=False
+                        ),
+                    )
+                except discord.HTTPException:
+                    pass
 
     @app_commands.command(name="bench-activate")
     @app_commands.describe(
-        match_index="The match number from /tournament list",
         out_member="The main being replaced",
         bench_member="The bench member stepping in",
         reason="Optional reason",
@@ -1074,12 +937,11 @@ class TournamentCommands(
     async def bench_activate(
         self,
         interaction: Interaction,
-        match_index: int,
         out_member: discord.Member,
         bench_member: discord.Member,
         reason: str = "",
     ) -> None:
-        """requests a bench activation for one match. captain only."""
+        """requests a bench activation for your team's current match. captain only."""
         season_id = seasons.active_season
         if not int(season_id):
             await interaction.response.send_message(
@@ -1096,19 +958,25 @@ class TournamentCommands(
 
         from tournament.brackets import Brackets
         brackets = Brackets(season_id=season_id)
-        matches = brackets.list_matches()
-        match_ids = list(matches.keys())
-        if match_index < 1 or match_index > len(match_ids):
-            await interaction.response.send_message(
-                f"Invalid match index. Must be 1-{len(match_ids)}.", ephemeral=True
-            )
+        match_key, state = brackets.team_active_match(team.id)
+
+        if not match_key:
+            if state == "completed":
+                await interaction.response.send_message(
+                    "Your team's match this round is done. Wait for the round to advance.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Your team doesn't have a match right now.", ephemeral=True
+                )
             return
 
         await interaction.response.defer(ephemeral=True)
         try:
             result = await GameClient().send_action(
                 "activate_bench",
-                match_key=match_ids[match_index - 1],
+                match_key=match_key,
                 out_discord=str(out_member.id),
                 in_discord=str(bench_member.id),
                 requested_by=str(interaction.user.id),
@@ -1231,8 +1099,8 @@ class TournamentCommands(
             )
             return
 
-        from server.notify import send_event
         from tournament.votes import Votes
+        from tournament.brackets import send_event
 
         try:
             hours = float(config.discord.get("perm_vote_hours", 48))
@@ -1258,3 +1126,129 @@ class TournamentCommands(
             f"Vote opened for team {team.id}. Closes in {int(hours)} hours.",
             ephemeral=True,
         )
+
+    @app_commands.command(name="uuid-accept")
+    @app_commands.describe(user="The player whose device change to approve")
+    @require(Authority.LEADER)
+    async def uuid_accept(self, interaction: Interaction, user: discord.Member) -> None:
+        """approves a pending or previously rejected device change."""
+        season_id = seasons.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing.", ephemeral=True
+            )
+            return
+        ok = Registration(season_id=season_id).uuid_accept(str(user.id))
+        if ok:
+            await interaction.response.send_message(
+                f"Approved. {user.mention}'s device is their current one.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "Nothing to approve for that player.", ephemeral=True
+        )
+
+    @app_commands.command(name="uuid-reject")
+    @app_commands.describe(user="The player whose device change to reject")
+    @require(Authority.LEADER)
+    async def uuid_reject(self, interaction: Interaction, user: discord.Member) -> None:
+        """rejects a pending device change."""
+        season_id = seasons.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing.", ephemeral=True
+            )
+            return
+        ok = Registration(season_id=season_id).uuid_reject(str(user.id))
+        if ok:
+            await interaction.response.send_message(
+                f"Rejected. {user.mention} stays on their previous device.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "Nothing to reject for that player.", ephemeral=True
+        )
+
+    @app_commands.command(name="report")
+    @app_commands.describe(
+        user="The player to report",
+        reason="Why you're reporting them",
+    )
+    async def report(
+        self, interaction: Interaction, user: discord.Member, reason: str
+    ) -> None:
+        """reports a player for suspicious behavior. all registered players can use this."""
+        season_id = seasons.active_season
+        if not int(season_id):
+            await interaction.response.send_message(
+                "There is no tournament ongoing.", ephemeral=True
+            )
+            return
+        registration = Registration(season_id=season_id)
+        if not registration.is_registered(str(interaction.user.id)):
+            await interaction.response.send_message(
+                "Only registered players can report.", ephemeral=True
+            )
+            return
+        if user.id == interaction.user.id:
+            await interaction.response.send_message(
+                "You can't report yourself.", ephemeral=True
+            )
+            return
+
+        key = (interaction.user.id, user.id)
+        now = time.time()
+        last = self._report_cooldowns.get(key, 0.0)
+        if now - last < 6 * 3600:
+            wait = int((6 * 3600 - (now - last)) // 60)
+            await interaction.response.send_message(
+                f"You've already reported them recently. Try again in ~{wait} minutes.",
+                ephemeral=True,
+            )
+            return
+        self._report_cooldowns[key] = now
+
+        from tournament import posts
+        channel_id = posts.staff_channel_id()
+        if not channel_id:
+            await interaction.response.send_message(
+                "Reports are not set up. Contact a staff member directly.", ephemeral=True
+            )
+            return
+
+        try:
+            channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+        except Exception:
+            await interaction.response.send_message(
+                "Couldn't send the report. Try again later.", ephemeral=True
+            )
+            return
+
+        from tournament.brackets import Brackets
+        try:
+            brackets = Brackets(season_id=season_id)
+            match_key, _state = brackets.team_active_match(registration.team_of(str(user.id)).id
+                if registration.team_of(str(user.id)) else "")
+        except Exception:
+            match_key = None
+
+        content = (
+            f"**Report**\n\n"
+            f"From: {interaction.user.mention}\n"
+            f"About: {user.mention}\n"
+            f"Reason: {reason}"
+        )
+        if match_key:
+            content += f"\nMatch: `{match_key}`"
+
+        try:
+            await channel.send(content)
+        except Exception:
+            await interaction.response.send_message(
+                "Couldn't send the report. Try again later.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message("Report sent to staff.", ephemeral=True)

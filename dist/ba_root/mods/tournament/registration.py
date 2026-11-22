@@ -53,8 +53,6 @@ def _bench_capacity(season_id: str) -> int:
 
 
 class Registration(Storage):
-    """storage class for registration."""
-
     def __init__(self, season_id: str):
         self.season_id = season_id
         super().__init__("registrations.json", SEASONS_DIR / season_id)
@@ -92,11 +90,24 @@ class Registration(Storage):
         db = self.read()
         return db.teams.get(db.players.get(str(discord_id), ""))
 
+    def find_member(self, discord_id: str) -> tuple[TeamSchema, MemberSchema] | None:
+        db = self.read()
+        team_id = db.players.get(str(discord_id))
+        if not team_id:
+            return None
+        team = db.teams.get(team_id)
+        if not team:
+            return None
+        for member in team.members:
+            if member.discord_id == str(discord_id):
+                return team, member
+        return None
+
     # ---- expiration ----
 
     @staticmethod
     def is_expired(team: TeamSchema) -> bool:
-        if team.status == TeamStatus.VERIFIED:
+        if team.status == TeamStatus.REGISTERED:
             return False
         if team.expires_at <= 0:
             return False
@@ -110,7 +121,7 @@ class Registration(Storage):
         team = db.teams.get(team_id)
         if not team:
             return None
-        if team.status == TeamStatus.VERIFIED:
+        if team.status == TeamStatus.REGISTERED:
             return None
         for member in team.members:
             db.players.pop(member.discord_id, None)
@@ -136,16 +147,14 @@ class Registration(Storage):
     # ---- reminders ----
 
     def reminder_due(self, team: TeamSchema) -> bool:
-        if team.status == TeamStatus.VERIFIED:
+        if team.status == TeamStatus.REGISTERED:
             return False
         if team.expires_at <= 0:
             return False
         if team.reminders_sent >= MAX_REMINDERS:
             return False
 
-        has_unaccepted = any(not m.accepted for m in team.mains)
-        has_unverified = any(not m.device_uuid for m in team.mains)
-        if not has_unaccepted and not has_unverified:
+        if all(m.accepted for m in team.mains):
             return False
 
         now = time.time()
@@ -180,8 +189,7 @@ class Registration(Storage):
         ts = team.declined.get(str(discord_id), 0.0)
         if not ts:
             return 0.0
-        remaining = DECLINE_COOLDOWN_SECONDS - (time.time() - ts)
-        return max(0.0, remaining)
+        return max(0.0, DECLINE_COOLDOWN_SECONDS - (time.time() - ts))
 
     # ---- registration ----
 
@@ -245,12 +253,24 @@ class Registration(Storage):
         db.teams[team_id] = TeamSchema(
             id=team_id,
             captain=captain_discord_id,
-            status=TeamStatus.IN_INVITATION if size > 1 else TeamStatus.UNVERIFIED,
+            status=TeamStatus.IN_INVITATION if size > 1 else TeamStatus.REGISTERED,
             members=members,
             expires_at=expires_at,
         )
         self.commit(db)
+
+        if size == 1:
+            self._post_registration_card(team_id, db.teams[team_id])
         return team_id
+
+    def _post_registration_card(self, team_id: str, team: TeamSchema) -> None:
+        mention = f"<@&{team.role_id}>" if team.role_id else f"<@{team.captain}>"
+        runner.run(data={
+            "type": "registration",
+            "name": team_id,
+            "season_id": self.season_id,
+            "mention": mention,
+        })
 
     def set_role(self, team_id: str, role_id: int) -> bool:
         db = self.read()
@@ -281,10 +301,10 @@ class Registration(Storage):
 
         member.account_id = new_account_id
         member.device_uuid = ""
-
-        if team.status == TeamStatus.VERIFIED:
-            if not all(m.device_uuid for m in team.mains):
-                team.status = TeamStatus.UNVERIFIED
+        member.uuid_history = []
+        member.pending_uuid = ""
+        member.pending_at = 0.0
+        member.last_rejected_uuid = ""
 
         self.commit(db)
         return True
@@ -322,7 +342,6 @@ class Registration(Storage):
     # ---- bench ----
 
     def add_bench(self, team_id: str, discord_id: str) -> str | bool:
-        """adds a bench member. returns True on success, or an error string."""
         discord_id = str(discord_id)
         team = self.get_team(team_id)
         if not team:
@@ -366,6 +385,68 @@ class Registration(Storage):
         self.commit(db)
         return True
 
+    # ---- uuid ----
+
+    def uuid_accept(self, discord_id: str) -> bool:
+        db = self.read()
+        team_id = db.players.get(str(discord_id))
+        if not team_id:
+            return False
+        team = db.teams.get(team_id)
+        if not team:
+            return False
+        for member in team.members:
+            if member.discord_id == str(discord_id):
+                target = member.pending_uuid or member.last_rejected_uuid
+                if not target:
+                    return False
+                member.device_uuid = target
+                member.uuid_history = [target]
+                member.pending_uuid = ""
+                member.pending_at = 0.0
+                member.last_rejected_uuid = ""
+                self.commit(db)
+                return True
+        return False
+
+    def uuid_reject(self, discord_id: str) -> bool:
+        db = self.read()
+        team_id = db.players.get(str(discord_id))
+        if not team_id:
+            return False
+        team = db.teams.get(team_id)
+        if not team:
+            return False
+        for member in team.members:
+            if member.discord_id == str(discord_id):
+                if not member.pending_uuid:
+                    return False
+                member.last_rejected_uuid = member.pending_uuid
+                member.pending_uuid = ""
+                member.pending_at = 0.0
+                self.commit(db)
+                return True
+        return False
+
+    def change_uuid(self, discord_id: str, new_uuid: str) -> bool:
+        db = self.read()
+        team_id = db.players.get(str(discord_id))
+        if not team_id:
+            return False
+        team = db.teams.get(team_id)
+        if not team:
+            return False
+        for member in team.members:
+            if member.discord_id == str(discord_id):
+                member.device_uuid = new_uuid
+                member.uuid_history = [new_uuid]
+                member.pending_uuid = ""
+                member.pending_at = 0.0
+                member.last_rejected_uuid = ""
+                self.commit(db)
+                return True
+        return False
+
     # ---- member removal ----
 
     def delete(self, team_id: str) -> str:
@@ -388,7 +469,7 @@ class Registration(Storage):
 
     def decline(self, discord_id: str) -> TeamSchema | None:
         team = self.team_of(discord_id)
-        if team and team.status == TeamStatus.VERIFIED:
+        if team and team.status == TeamStatus.REGISTERED:
             return None
         return self._remove_member(discord_id, cooldown=True)
 
@@ -453,7 +534,7 @@ class Registration(Storage):
             return False
         if self.is_expired(team):
             return None
-        if team.status == TeamStatus.VERIFIED:
+        if team.status == TeamStatus.REGISTERED:
             return False
 
         for member in team.mains:
@@ -461,69 +542,16 @@ class Registration(Storage):
                 member.accepted = True
                 member.invited_at = time.time()
                 if all(m.accepted for m in team.mains):
-                    team.status = TeamStatus.UNVERIFIED
+                    team.status = TeamStatus.REGISTERED
+                    self.commit(db)
+                    send_event("team_verified", season_id=self.season_id, team_id=team_id)
+                    self._post_registration_card(team_id, team)
+                    return True
                 self.commit(db)
                 return True
         return False
 
-    def verify(self, account_id: str, device_uuid: str):
-        account_id = str(account_id)
-        db = self.read()
-        team_id = db.players.get(account_id)
-        if not team_id:
-            return "not_registered"
-        team = db.teams.get(team_id)
-        if not team:
-            return "not_registered"
-
-        for member in team.mains:
-            if member.account_id == account_id:
-                if member.device_uuid:
-                    return "already"
-                member.device_uuid = device_uuid
-                all_verified = all(m.device_uuid for m in team.mains)
-                if all_verified:
-                    team.status = TeamStatus.VERIFIED
-                self.commit(db)
-
-                send_event("team_verified", season_id=self.season_id, team_id=team_id)
-
-                if all_verified:
-                    mention = f"<@&{team.role_id}>" if team.role_id else f"<@{team.captain}>"
-                    runner.run(data={
-                        "type": "registration",
-                        "name": team_id,
-                        "season_id": self.season_id,
-                        "mention": mention,
-                    })
-                return True
-
-        for bench_member in team.bench:
-            if bench_member.account_id == account_id:
-                if bench_member.device_uuid:
-                    return "already"
-                bench_member.device_uuid = device_uuid
-                self.commit(db)
-                return True
-
-        return "not_registered"
-
-    def change_uuid(self, discord_id: str, new_uuid: str) -> bool:
-        db = self.read()
-        team_id = db.players.get(str(discord_id))
-        if not team_id:
-            return False
-        team = db.teams.get(team_id)
-        if not team:
-            return False
-        for member in team.mains:
-            if member.discord_id == str(discord_id):
-                member.device_uuid = new_uuid
-                self.commit(db)
-                return True
-        return False
-
-    # ---- waitlist promotion ----
+    # ---- waitlist ----
 
     def promote_from_waitlist(self, slots: int = 1) -> list[dict]:
         try:

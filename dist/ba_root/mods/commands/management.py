@@ -219,3 +219,12 @@ def remove_admin(client: Client, target: Client):
     """Remove admin"""
     roles.remove(Role.ADMIN, target.account_id)
     client.success(f"Removed {target.name} as admin")
+
+
+@on_command(name="/uuid", authority=Authority.LEADER, usage="/uuid <client id>")
+def show_uuid(client: Client, target: Client):
+    """Sends the target client's device uuid."""
+    if target is None:
+        client.error("No client with that id. Use /list to see the ids.")
+        return
+    client.send(target.public_uuid, sender=f"{target.name}'s UUID")

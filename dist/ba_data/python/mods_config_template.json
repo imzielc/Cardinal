@@ -35,6 +35,9 @@
         "brackets_channel_id": 0,
         "hold_hours": 3,
         "invite_expire_hours": 56,
+        "uuid_silent_changes": 2,
+        "uuid_grace_hours": 48,
+        "perm_vote_hours": 48,
         "webhooks": {
             "brackets": "ENTER-YOUR-WEBHOOK-URL-HERE",
             "dashboard": "ENTER-YOUR-WEBHOOK-URL-HERE",

@@ -14,18 +14,14 @@ from server.enums import (
 
 
 class BaseSchema:
-    """base schema for all the schemas."""
-
     @classmethod
     def from_dict(cls, data: dict):
-        """validates the data into the schema."""
         if not data:
             return cls()
         from pydantic import TypeAdapter
         return TypeAdapter(cls).validate_python(data)
 
     def to_dict(self) -> dict:
-        """serializes the schema back into a dict."""
         return asdict(self)
 
 
@@ -60,16 +56,14 @@ class MatchTeamSchema(BaseSchema):
 
 @dataclass
 class BenchActivationSchema(BaseSchema):
-    """a bench member stepping in for a main, for one match."""
     team: str
     out_discord_id: str
     out_account_id: str
     in_discord_id: str
     in_account_id: str
-    in_uuid: str
     requested_by: str
     reason: str = ""
-    state: str = "PENDING"  # PENDING | ACCEPTED | DECLINED | FORCE
+    state: str = "PENDING"
     at: float = 0.0
     expires_at: float = 0.0
 
@@ -94,7 +88,6 @@ class MatchSchema(BaseSchema):
 class PendingMatchSchema(BaseSchema):
     key: str
     match: MatchSchema
-    uuids: list[str]
     players: list[str]
     teams: dict[str, list[str]] = field(default_factory=dict)
 
@@ -145,7 +138,11 @@ class MemberSchema(BaseSchema):
     device_uuid: str = ""
     accepted: bool = False
     invited_at: float = 0.0
-    role: str = "main"  # "main" | "bench"
+    role: str = "main"
+    uuid_history: list[str] = field(default_factory=list)
+    pending_uuid: str = ""
+    pending_at: float = 0.0
+    last_rejected_uuid: str = ""
 
     def to_public(self) -> dict:
         data = self.to_dict()
@@ -153,6 +150,12 @@ class MemberSchema(BaseSchema):
             data["device_uuid"] = "***"
         if data["account_id"]:
             data["account_id"] = "***"
+        if data["uuid_history"]:
+            data["uuid_history"] = ["***"] * len(data["uuid_history"])
+        if data["pending_uuid"]:
+            data["pending_uuid"] = "***"
+        if data["last_rejected_uuid"]:
+            data["last_rejected_uuid"] = "***"
         return data
 
 
@@ -242,8 +245,8 @@ class SwapVoteSchema(BaseSchema):
     reason: str = ""
     created_at: float = 0.0
     closes_at: float = 0.0
-    votes: dict[str, str] = field(default_factory=dict)  # discord_id -> "yes" | "no"
-    state: str = "OPEN"  # OPEN | PASSED | FAILED
+    votes: dict[str, str] = field(default_factory=dict)
+    state: str = "OPEN"
     message_id: int = 0
     channel_id: int = 0
 

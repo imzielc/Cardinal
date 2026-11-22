@@ -6,7 +6,7 @@ from discord.ext import commands
 
 from discord_bot.helpers import fetch_account_info, require
 from discord_bot.ui import LinkedAccountView
-from server.enums import Authority, TeamStatus
+from server.enums import Authority
 from tournament import seasons
 from tournament.link import link
 from tournament.registration import Registration
@@ -128,18 +128,13 @@ class AccountCommands(
         link.relink(discord_id, new_account_id)
 
         reg_updated = False
-        team_downgraded = False
         season_id = seasons.active_season
         if int(season_id):
             registration = Registration(season_id=season_id)
             team = registration.team_of(discord_id)
             if team:
-                was_verified = team.status == TeamStatus.VERIFIED
                 if registration.change_account_id(team.id, discord_id, new_account_id):
                     reg_updated = True
-                    updated = registration.get_team(team.id)
-                    if was_verified and updated and updated.status != TeamStatus.VERIFIED:
-                        team_downgraded = True
                     # refresh the invitation view for the team's thread.
                     try:
                         from server.notify import send_event
@@ -154,11 +149,9 @@ class AccountCommands(
 
         parts = [f"Updated {user.mention}: `{old_account_id or '(none)'}` → `{new_account_id}`."]
         if reg_updated:
-            parts.append("Tournament registration updated.")
-        if team_downgraded:
-            parts.append("Team downgraded to unverified.")
-        if reg_updated:
-            parts.append("They need to run `/verify` in-game again.")
+            parts.append(
+                "Tournament registration updated. Their device is re-captured on the next /ready."
+            )
         await interaction.response.send_message(" ".join(parts), ephemeral=True)
 
     @app_commands.command(name="unlink")

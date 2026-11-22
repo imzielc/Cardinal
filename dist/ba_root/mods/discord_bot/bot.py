@@ -25,8 +25,7 @@ from discord_bot.ui import (
 from server import config
 from server.enums import TeamStatus
 from tournament import seasons
-from tournament.bench_panels import bench_panels
-from tournament.ready_panels import ready_panels
+from tournament.panels import bench_panels, ready_panels
 from tournament.registration import Registration
 from tournament.votes import Votes
 

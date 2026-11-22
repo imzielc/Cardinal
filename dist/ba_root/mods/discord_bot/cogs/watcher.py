@@ -29,7 +29,6 @@ class TeamInvitationWatcher(commands.Cog):
         if not int(season_id):
             return
         try:
-            # 1. expire anything past its deadline and clean up Discord.
             expired = await cleanup_expired_teams(self.bot, season_id)
             for team in expired:
                 print(
@@ -38,18 +37,11 @@ class TeamInvitationWatcher(commands.Cog):
                     f"expires_at={int(team.expires_at)})"
                 )
 
-            # 2. remind any team that is still pending verification.
-            #    we re-read each team by id inside the loop (via get_team),
-            #    so a verify that happens while an earlier reminder is being
-            #    awaited is picked up on the very next iteration. this closses
-            #    the race where a snapshot taken at loop start would still
-            #    show a just-verified team as pending.
             registration = Registration(season_id=season_id)
             team_ids = list(registration.read().teams.keys())
             for team_id in team_ids:
                 team = registration.get_team(team_id)
                 if team is None:
-                    # deleted during the loop (expired, dissolved, etc.)
                     continue
                 if not registration.reminder_due(team):
                     continue
@@ -59,13 +51,6 @@ class TeamInvitationWatcher(commands.Cog):
             print(f"Discord: invitation watcher failed:\n{format_exc()}")
 
     async def _send_reminder(self, team) -> bool:
-        """sends a reminder into the team's thread.
-
-        returns True if the reminder was sent OR could not be sent for a
-        permanent reason (thread gone, nobody left to remind) — in both cases
-        the caller marks it as handled. returns False only on a transient
-        error, so the next cycle retries.
-        """
         if not team.thread_id:
             return True
 
@@ -96,16 +81,13 @@ class TeamInvitationWatcher(commands.Cog):
         return True
 
     def _reminder_message(self, team) -> tuple[str | None, list[str]]:
-        """builds the reminder text and the list of discord ids to ping."""
-        unaccepted = [m for m in team.members if not m.accepted]
-        unverified = [m for m in team.members if not m.device_uuid]
-
-        if not unaccepted and not unverified:
+        unaccepted = [m for m in team.mains if not m.accepted]
+        if not unaccepted:
             return None, []
 
         targets: list[str] = []
         seen: set[str] = set()
-        for member in list(unaccepted) + list(unverified):
+        for member in unaccepted:
             if member.discord_id in seen:
                 continue
             seen.add(member.discord_id)
@@ -116,17 +98,10 @@ class TeamInvitationWatcher(commands.Cog):
         mention_line = " ".join(f"<@{did}>" for did in targets)
         expiry = f"\n{_expiry_label(team.expires_at)}" if team.expires_at > 0 else ""
 
-        if unaccepted:
-            body = (
-                f"{mention_line} — invitation for team **{team.id}** is still pending.\n"
-                f"Use the message above to accept or decline.{expiry}"
-            )
-        else:
-            body = (
-                f"{mention_line} — everyone joined team **{team.id}**, "
-                f"but verification isn't complete yet.\n"
-                f"Join the game server and run `/verify` in-game.{expiry}"
-            )
+        body = (
+            f"{mention_line} — invitation for team **{team.id}** is still pending.\n"
+            f"Use the message above to accept or decline.{expiry}"
+        )
         return body, targets
 
     @watch.before_loop

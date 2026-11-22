@@ -63,38 +63,3 @@ def link_account(client: Client, args: list[str]):
         client.error("That code is invalid or has expired, use /link on discord to get a new one.")
         return
     client.success("Linked! You can now register in discord.")
-
-
-@on_command(name="/verify")
-def verify(client: Client):
-    """finishes the tournament registration for this game account."""
-    season_id = seasons.active_season
-    if not int(season_id):
-        client.error("There is no tournament ongoing.")
-        return
-
-    registration = Registration(season_id=season_id)
-    status = registration.verify(
-        account_id=client.account_id,
-        device_uuid=client.public_uuid,
-    )
-    if status is True:
-        client.success("You're verified!")
-        return
-    if status == "already":
-        client.error("You're already verified.")
-        return
-    if status == "not_registered":
-        # give a reason instead of a blunt "not registered".
-        discord_id = link.discord_of(client.account_id)
-        if discord_id is None:
-            client.error("This game account isn't linked. Run /account link in discord.")
-            return
-        team = registration.team_of(discord_id)
-        if team is None:
-            client.error("You're not on a tournament team. Register in discord first.")
-            return
-        # on a team, but with a different account.
-        client.error("Your discord is on a team with a different account. Contact an admin.")
-        return
-    client.error("Something went wrong. Contact an admin.")

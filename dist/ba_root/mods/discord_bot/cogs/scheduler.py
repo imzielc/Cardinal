@@ -1,5 +1,5 @@
 """releases queued round starts during the nightly IST window, and runs
-periodic housekeeping (bench activation expiry, swap vote closing)."""
+periodic housekeeping (bench activation expiry, swap vote closing, panel reap)."""
 
 from __future__ import annotations
 
@@ -7,13 +7,12 @@ import datetime
 import time
 from traceback import format_exc
 
-import discord
 from discord.ext import commands, tasks
 
 from discord_bot.client import GameClient
 from tournament import seasons
 from tournament.brackets import Brackets
-from tournament.bench_panels import bench_panels
+from tournament.panels import bench_panels, ready_panels
 from tournament.votes import Votes
 
 RELEASE_START_HOUR = 0
@@ -67,7 +66,7 @@ class RoundScheduler(commands.Cog):
 
 
 class MaintenanceScheduler(commands.Cog):
-    """expires bench activations and closes swap votes every 30 minutes."""
+    """housekeeping every 30 minutes."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -93,6 +92,11 @@ class MaintenanceScheduler(commands.Cog):
             await self._close_votes(season_id)
         except Exception:
             print(f"Discord: vote closing failed:\n{format_exc()}")
+
+        try:
+            self._reap_panels(season_id)
+        except Exception:
+            print(f"Discord: panel reap failed:\n{format_exc()}")
 
     async def _expire_bench(self, season_id: str) -> None:
         try:
@@ -148,6 +152,22 @@ class MaintenanceScheduler(commands.Cog):
                 self.bot,
                 {"season_id": season_id, "vote_id": closed.id, "outcome": closed.state},
             )
+
+    def _reap_panels(self, season_id: str) -> None:
+        """drops panels whose match is no longer in the season."""
+        try:
+            brackets = Brackets(season_id=season_id)
+            live = set(brackets.list_matches().keys())
+        except Exception:
+            return
+
+        for match_key, _entry in list(ready_panels.items(season_id)):
+            if match_key not in live:
+                ready_panels.remove(season_id, match_key)
+
+        for match_key, team, _entry in list(bench_panels.items(season_id)):
+            if match_key not in live:
+                bench_panels.remove(season_id, match_key, team)
 
     @tick.before_loop
     async def before_tick(self) -> None:
