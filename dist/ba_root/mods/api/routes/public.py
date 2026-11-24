@@ -14,6 +14,7 @@ from tournament.schema import (
     MatchSchema,
     PlacementSchema,
     PlayerStatsSchema,
+    SeasonSchema,
     TeamSchema,
     WaitlistEntrySchema,
 )
@@ -21,10 +22,10 @@ from tournament.storage import SEASONS_DIR
 from tournament.waitlist import Waitlist
 from api.registry import route
 from api.schema import (
+    HallOfFameEntry,
     HallOfFameResponse,
     RoundsResponse,
-    SeasonsListResponse,
-    SeasonInfoResponse,
+    SeasonDetailResponse,
 )
 
 
@@ -44,29 +45,10 @@ def _resolve(season_id: str) -> str:
     return season_id
 
 
-def _season_aggregates(season_id: str, season) -> dict:
-    """team count and champion for a season."""
-    try:
-        team_count = len(Registration(season_id).read().teams)
-    except Exception:
-        team_count = 0
-
-    champion = None
-    if season.stage == TournamentStage.COMPLETED:
-        try:
-            meta = Brackets(season_id).read_meta()
-            if meta.placements:
-                champion = meta.placements[0].team
-        except Exception:
-            pass
-
-    return {"team_count": team_count, "champion": champion}
-
-
 @route(
     "GET",
     "/v1/seasons",
-    response=SeasonsListResponse,
+    response=dict[str, SeasonSchema],
     query={"status": "string", "mode": "string"},
 )
 async def list_seasons(request: web.Request) -> web.Response:
@@ -81,8 +63,7 @@ async def list_seasons(request: web.Request) -> web.Response:
             continue
         if mode_filter and season.mode.value != mode_filter:
             continue
-        aggregates = _season_aggregates(sid, season)
-        out[sid] = {**season.to_dict(), **aggregates}
+        out[sid] = season.to_dict()
 
     return web.json_response({
         "active_season": db.active_season,
@@ -90,15 +71,13 @@ async def list_seasons(request: web.Request) -> web.Response:
     })
 
 
-@route("GET", "/v1/seasons/{season_id}", response=SeasonInfoResponse)
+@route("GET", "/v1/seasons/{season_id}", response=SeasonDetailResponse)
 async def season_info(request: web.Request) -> web.Response:
     """One season's info. Use 'active' for the running one."""
     sid = _resolve(request.match_info["season_id"])
     season = seasons_storage.get_season(sid)
     if season is None:
         raise web.HTTPNotFound(reason="No such season.")
-
-    aggregates = _season_aggregates(sid, season)
 
     placements = None
     if season.stage == TournamentStage.COMPLETED:
@@ -114,14 +93,22 @@ async def season_info(request: web.Request) -> web.Response:
         else False
     )
 
-    return web.json_response({
-        **season.to_dict(),
-        **aggregates,
-        "season_id": sid,
-        "is_active": sid == seasons_storage.active_season,
-        "registrations_open": regs_open,
-        "placements": placements,
-    })
+    resp = SeasonDetailResponse(
+        season_id=sid,
+        series=season.series,
+        type=season.type,
+        mode=season.mode,
+        stage=season.stage,
+        created_at=season.created_at,
+        completed_at=season.completed_at,
+        participant_role_id=season.participant_role_id,
+        champion=season.champion,
+        team_count=season.team_count,
+        is_active=sid == seasons_storage.active_season,
+        registrations_open=regs_open,
+        placements=placements,
+    )
+    return web.json_response(resp.to_dict())
 
 
 @route(
@@ -149,21 +136,25 @@ async def hall_of_fame(request: web.Request) -> web.Response:
         placements = []
         try:
             meta = Brackets(sid).read_meta()
-            placements = [p.to_dict() for p in meta.placements]
+            placements = meta.placements
         except Exception:
             pass
 
-        entries.append({
-            "season_id": sid,
-            "type": season.type.value,
-            "mode": season.mode.value,
-            "series": season.series.value,
-            "created_at": season.created_at,
-            "completed_at": season.completed_at,
-            "placements": placements,
-        })
+        entry = HallOfFameEntry(
+            season_id=sid,
+            series=season.series,
+            type=season.type,
+            mode=season.mode,
+            created_at=season.created_at,
+            completed_at=season.completed_at,
+            champion=season.champion,
+            team_count=season.team_count,
+            placements=placements,
+        )
+        entries.append(entry)
 
-    return web.json_response({"entries": entries})
+    resp = HallOfFameResponse(entries=entries)
+    return web.json_response(resp.to_dict())
 
 
 @route(
@@ -189,19 +180,12 @@ async def season_rounds(request: web.Request) -> web.Response:
     sid = _resolve(request.match_info["season_id"])
     brackets = Brackets(sid)
     meta = brackets.read_meta()
-    out = {
-        "season_id": sid,
-        "mode": meta.mode.value,
-        "started": meta.started,
-        "status": meta.status.value,
-        "active_rounds": list(meta.active_rounds),
-        "pending_round_start": list(meta.pending_round_start),
-        "rounds": {},
-    }
+    
+    rounds = {}
     if "group-stage" in meta.active_rounds:
         try:
             gs = brackets.read_gs()
-            out["rounds"] = {
+            rounds = {
                 gid: {rid: rd.to_dict() for rid, rd in g.rounds.items()}
                 for gid, g in gs.groups.items()
             }
@@ -210,13 +194,23 @@ async def season_rounds(request: web.Request) -> web.Response:
     else:
         try:
             stage = brackets.read_stage()
-            out["rounds"] = {
-                bracket: {rid: rd.to_dict() for rid, rd in rounds.items()}
-                for bracket, rounds in stage.items()
+            rounds = {
+                bracket: {rid: rd.to_dict() for rid, rd in rounds_dict.items()}
+                for bracket, rounds_dict in stage.items()
             }
         except Exception:
             pass
-    return web.json_response(out)
+    
+    resp = RoundsResponse(
+        season_id=sid,
+        mode=meta.mode.value,
+        started=meta.started,
+        status=meta.status.value,
+        active_rounds=list(meta.active_rounds),
+        pending_round_start=list(meta.pending_round_start),
+        rounds=rounds,
+    )
+    return web.json_response(resp.to_dict())
 
 
 @route(

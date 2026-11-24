@@ -34,6 +34,8 @@ class SeasonSchema(BaseSchema):
     created_at: str = ""
     completed_at: str = ""
     participant_role_id: int = 0
+    champion: str = ""
+    team_count: int = 0
 
 
 @dataclass
@@ -46,7 +48,7 @@ class SeasonsSchema(BaseSchema):
 
 @dataclass
 class MatchTeamSchema(BaseSchema):
-    idx: int
+    idx: int = 0
     name: str | None = None
     score: int = 0
     series: int = 0
@@ -56,12 +58,12 @@ class MatchTeamSchema(BaseSchema):
 
 @dataclass
 class BenchActivationSchema(BaseSchema):
-    team: str
-    out_discord_id: str
-    out_account_id: str
-    in_discord_id: str
-    in_account_id: str
-    requested_by: str
+    team: str = ""
+    out_discord_id: str = ""
+    out_account_id: str = ""
+    in_discord_id: str = ""
+    in_account_id: str = ""
+    requested_by: str = ""
     reason: str = ""
     state: str = "PENDING"
     at: float = 0.0
@@ -70,7 +72,7 @@ class BenchActivationSchema(BaseSchema):
 
 @dataclass
 class MatchSchema(BaseSchema):
-    match_id: str
+    match_id: str = ""
     teams: list[MatchTeamSchema] = field(default_factory=list)
     status: Status = Status.PENDING
     winner_idx: int | None = None
@@ -86,9 +88,9 @@ class MatchSchema(BaseSchema):
 
 @dataclass
 class PendingMatchSchema(BaseSchema):
-    key: str
-    match: MatchSchema
-    players: list[str]
+    key: str = ""
+    match: MatchSchema = field(default_factory=MatchSchema)
+    players: list[str] = field(default_factory=list)
     teams: dict[str, list[str]] = field(default_factory=dict)
 
 
@@ -133,7 +135,7 @@ class BracketsMetaSchema(BaseSchema):
 
 @dataclass
 class MemberSchema(BaseSchema):
-    discord_id: str
+    discord_id: str = ""
     account_id: str = ""
     device_uuid: str = ""
     accepted: bool = False
@@ -161,8 +163,8 @@ class MemberSchema(BaseSchema):
 
 @dataclass
 class TeamSchema(BaseSchema):
-    id: str
-    captain: str
+    id: str = ""
+    captain: str = ""
     status: TeamStatus = TeamStatus.IN_INVITATION
     members: list[MemberSchema] = field(default_factory=list)
     thread_id: int = 0
@@ -195,7 +197,7 @@ class RegistrationSchema(BaseSchema):
 
 @dataclass
 class LinkCodeSchema(BaseSchema):
-    discord_id: str
+    discord_id: str = ""
     expires_at: float = 0.0
 
 
@@ -213,8 +215,8 @@ class MatchThreadsSchema(BaseSchema):
 
 @dataclass
 class WaitlistEntrySchema(BaseSchema):
-    captain_discord_id: str
-    team_name: str
+    captain_discord_id: str = ""
+    team_name: str = ""
     invited_member_ids: list[str] = field(default_factory=list)
     added_at: float = 0.0
 
@@ -236,12 +238,12 @@ class PlayerStatsSchema(BaseSchema):
 
 @dataclass
 class SwapVoteSchema(BaseSchema):
-    id: str
-    team_id: str
-    out_discord_id: str
-    in_discord_id: str
-    in_account_id: str
-    requested_by: str
+    id: str = ""
+    team_id: str = ""
+    out_discord_id: str = ""
+    in_discord_id: str = ""
+    in_account_id: str = ""
+    requested_by: str = ""
     reason: str = ""
     created_at: float = 0.0
     closes_at: float = 0.0

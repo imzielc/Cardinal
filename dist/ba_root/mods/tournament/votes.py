@@ -89,3 +89,19 @@ class Votes(Storage):
 
     def open_votes(self) -> list[SwapVoteSchema]:
         return [v for v in self.read().votes.values() if v.state == "OPEN"]
+
+    def cooldown_remaining(
+        self, team_id: str, discord_ids: list[str], window_seconds: float
+    ) -> float:
+        """seconds left before this team or one of those members can open another vote."""
+        if window_seconds <= 0:
+            return 0.0
+        wanted = {str(d) for d in discord_ids}
+        latest = 0.0
+        for vote in self.read().votes.values():
+            involved = wanted & {vote.out_discord_id, vote.in_discord_id}
+            if vote.team_id == team_id or involved:
+                latest = max(latest, vote.created_at)
+        if not latest:
+            return 0.0
+        return max(0.0, latest + window_seconds - time.time())

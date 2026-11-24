@@ -2,13 +2,8 @@
 
 from dataclasses import dataclass, field
 
-from server.enums import SeriesType, TournamentMode, TournamentType
-from tournament.schema import (
-    MatchSchema,
-    PlacementSchema,
-    RoundSchema,
-    SeasonSchema,
-)
+from server.enums import SeriesType, TournamentMode, TournamentStage, TournamentType
+from tournament.schema import PlacementSchema, RoundSchema
 
 
 @dataclass
@@ -22,7 +17,6 @@ class SpecResponse:
     version: str = ""
     generated_at: int = 0
     endpoints: list[dict] = field(default_factory=list)
-    schemas: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -74,36 +68,33 @@ class RefreshResponse:
 
 
 @dataclass
-class SeasonListItemSchema(SeasonSchema):
-    """a season in the list response, with aggregations."""
-    team_count: int = 0
-    champion: str | None = None
-
-
-@dataclass
-class SeasonsListResponse:
-    active_season: str = ""
-    seasons: dict[str, SeasonListItemSchema] = field(default_factory=dict)
-
-
-@dataclass
-class SeasonInfoResponse(SeasonSchema):
+class SeasonDetailResponse:
+    """response for GET /v1/seasons/{season_id}"""
     season_id: str = ""
+    series: SeriesType = SeriesType.BO3
+    type: TournamentType = TournamentType.SOLO
+    mode: TournamentMode = TournamentMode.SINGLE
+    stage: TournamentStage = TournamentStage.NONE
+    created_at: str = ""
+    completed_at: str = ""
+    participant_role_id: int = 0
+    champion: str = ""
+    team_count: int = 0
     is_active: bool = False
     registrations_open: bool = False
-    team_count: int = 0
-    champion: str | None = None
     placements: list[PlacementSchema] | None = None
 
 
 @dataclass
 class HallOfFameEntry:
     season_id: str = ""
+    series: SeriesType = SeriesType.BO3
     type: TournamentType = TournamentType.SOLO
     mode: TournamentMode = TournamentMode.SINGLE
-    series: SeriesType = SeriesType.BO3
     created_at: str = ""
     completed_at: str = ""
+    champion: str = ""
+    team_count: int = 0
     placements: list[PlacementSchema] = field(default_factory=list)
 
 
@@ -133,7 +124,7 @@ class LinksResponse:
 class WinResponse:
     ok: bool = False
     message: str = ""
-    match: MatchSchema | None = None
+    match: dict | None = None
 
 
 @dataclass

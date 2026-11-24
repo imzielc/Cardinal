@@ -109,6 +109,10 @@ class Brackets(Storage):
 
         return payload
 
+    def round_payload(self) -> list[dict]:
+        """payload for every playable match that has already been announced."""
+        return self._build_round_payload([])
+
     def _fire_round_event(self) -> None:
         """fires round_started immediately, no queueing. used for the first round."""
         payload = self._build_round_payload([])
@@ -576,11 +580,14 @@ class Brackets(Storage):
         from datetime import datetime, timezone
         from tournament import seasons
 
+        meta = self.read_meta()
         db = seasons.read()
         season = db.seasons.get(self.season_id)
         if season:
             season.stage = TournamentStage.COMPLETED
             season.completed_at = datetime.now(timezone.utc).isoformat()
+            if meta.placements:
+                season.champion = meta.placements[0].team
         db.active_season = "0"
         seasons.commit(db)
 

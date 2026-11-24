@@ -8,6 +8,7 @@ import discord
 from discord import Interaction, app_commands
 from discord.ext import commands
 
+from discord_bot import runtime
 from discord_bot.client import GameClient
 from discord_bot.helpers import require
 from roles import roles
@@ -17,6 +18,8 @@ from server.storage import MODS_DIR
 SSH_TIMEOUT_SECONDS = 30
 SSH_OUTPUT_INLINE_MAX = 1800
 SSH_OUTPUT_PREVIEW_CHARS = 800
+
+BOT_CLOSE_TIMEOUT = 5.0
 
 
 class GeneralCommands(commands.Cog):
@@ -244,3 +247,42 @@ class GeneralCommands(commands.Cog):
             await interaction.response.send_message(
                 f"{user.name} has been added to owners", ephemeral=True
             )
+
+    @app_commands.command(name="bot-restart")
+    @require(Authority.LEADER)
+    async def bot_restart(self, interaction: Interaction) -> None:
+        """restart the discord bot. leader only.
+
+        picks up new bot code and discord.* config. events sent by the game
+        during the few seconds it's gone are dropped, though match threads come
+        back when it reconnects. avoid restarting mid-match.
+        """
+        await self._bounce(interaction, "Restarting the bot...")
+
+    @app_commands.command(name="bot-stop")
+    @require(Authority.LEADER)
+    async def bot_stop(self, interaction: Interaction) -> None:
+        """stop the discord bot. leader only.
+
+        it stays down until the server starts again, or until something else
+        starts it.
+        """
+        await self._bounce(interaction, "Stopping the bot...", stop=True)
+
+    async def _bounce(
+        self, interaction: Interaction, message: str, *, stop: bool = False
+    ) -> None:
+        """replies, closes the client, then reloads or exits the process."""
+        await interaction.response.send_message(message, ephemeral=True)
+
+        # set before closing: if main() gets control back first, it honours it.
+        if stop:
+            runtime.stop()
+
+        try:
+            await asyncio.wait_for(self.bot.close(), timeout=BOT_CLOSE_TIMEOUT)
+        except Exception:
+            pass
+
+        # never returns; a hung close still ends the process.
+        runtime.replace()

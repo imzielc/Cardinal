@@ -119,7 +119,23 @@ def _startup_tasks() -> None:
 
     if config.api.enable:
         _ensure_api()
+    if config.discord.enable:
+        _ensure_bot()
     _pull_updates()
+
+
+def _ensure_bot() -> None:
+    """starts the bot if it isn't already running.
+
+    the bot restarts itself on crash; this only handles "never started".
+    """
+    try:
+        from discord_bot.launcher import ensure_bot
+
+        ensure_bot()
+    except Exception as e:
+        print(f"[bot] failed to ensure bot: {e}")
+
 
 # ba_meta export babase.Plugin
 class Load(babase.Plugin):

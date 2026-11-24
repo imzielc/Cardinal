@@ -397,12 +397,18 @@ def _ready_panel_content(match_key: str, snapshot: dict) -> str:
 
 
 async def _finalize_ready_panel(
-    bot: commands.Bot, channel_id: int, message_id: int, status: str
+    bot: commands.Bot,
+    channel_id: int,
+    message_id: int,
+    status: str,
+    content: str | None = None,
 ) -> None:
     try:
         channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
         message = await channel.fetch_message(int(message_id))
-        base = message.content or ""
+        # content lets the caller redraw the final snapshot instead of appending
+        # a status line to the stale body from the previous /ready.
+        base = content if content is not None else (message.content or "")
         await message.edit(content=f"{base}\n\n*{status}*", view=None)
     except Exception:
         pass
@@ -452,6 +458,15 @@ async def on_team_verified(bot: commands.Bot, payload: dict) -> None:
             registration.set_invitation_message(team_id, message.id)
         except Exception:
             pass
+
+
+# serializes thread creation so a boot reconcile can't race an incoming round payload.
+_thread_lock = asyncio.Lock()
+
+
+async def _locked_round_started(bot: commands.Bot, payload: dict) -> None:
+    async with _thread_lock:
+        await on_round_started(bot, payload)
 
 
 async def on_round_started(bot: commands.Bot, payload: dict) -> None:
@@ -607,6 +622,22 @@ async def on_round_started(bot: commands.Bot, payload: dict) -> None:
             pass
 
 
+async def reconcile_match_threads(bot: commands.Bot) -> None:
+    """rebuilds match threads from disk. the game only announces a round once, so
+    a bot restart would otherwise leave a live round without any threads."""
+    season_id = str(seasons.active_season)
+    if not int(season_id):
+        return
+    try:
+        from tournament.brackets import Brackets
+
+        matches = Brackets(season_id=season_id).round_payload()
+    except Exception:
+        return
+    async with _thread_lock:
+        await on_round_started(bot, {"season_id": season_id, "matches": matches})
+
+
 async def on_match_ended(bot: commands.Bot, payload: dict) -> None:
     """a single match finished. close its thread."""
     season_id = str(payload.get("season_id") or "")
@@ -663,14 +694,20 @@ async def on_ready_panel(bot: commands.Bot, payload: dict) -> None:
     season_id = str(payload.get("season_id") or "")
     match_key = str(payload.get("match_key") or "")
     state = payload.get("state") or "waiting"
+    snapshot = payload.get("snapshot") or {}
     if not season_id or not match_key:
         return
 
     if state == "started":
         entry = ready_panels.get(season_id, match_key)
         if entry:
+            content = _ready_panel_content(match_key, snapshot) if snapshot else None
             await _finalize_ready_panel(
-                bot, entry["channel_id"], entry["message_id"], "Match started."
+                bot,
+                entry["channel_id"],
+                entry["message_id"],
+                "Match started.",
+                content,
             )
             ready_panels.remove(season_id, match_key)
 
@@ -687,7 +724,6 @@ async def on_ready_panel(bot: commands.Bot, payload: dict) -> None:
             bench_panels.remove(season_id, bkey, bteam)
         return
 
-    snapshot = payload.get("snapshot") or {}
     if not snapshot:
         return
 
@@ -902,7 +938,7 @@ async def on_swap_vote_closed(bot: commands.Bot, payload: dict) -> None:
 
 HANDLERS = {
     "team_verified": on_team_verified,
-    "round_started": on_round_started,
+    "round_started": _locked_round_started,
     "match_ended": on_match_ended,
     "tournament_completed": on_tournament_completed,
     "match_announcement": on_match_announcement,

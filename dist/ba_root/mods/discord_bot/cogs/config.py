@@ -13,9 +13,9 @@ from server.enums import Authority
 RESTART_NOTES = {
     "api.enable": "needs a game restart — the loader only checks at boot.",
     "discord.enable": "needs a game restart — the bot is spawned at boot.",
-    "discord.token": "needs a game restart — the bot is spawned at boot.",
-    "discord.port": "needs a game restart.",
-    "discord.bot_port": "needs a game restart.",
+    "discord.token": "needs /bot-restart — the bot reads this at startup.",
+    "discord.port": "needs a game restart and /bot-restart.",
+    "discord.bot_port": "needs /bot-restart — the bot binds this at startup.",
 }
 
 

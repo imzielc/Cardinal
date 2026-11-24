@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 
 import discord
 from discord import Interaction, app_commands
@@ -1107,7 +1108,23 @@ class TournamentCommands(
         except (TypeError, ValueError):
             hours = 48.0
 
+        try:
+            cooldown_hours = float(config.discord.get("swap_cooldown_hours", 168))
+        except (TypeError, ValueError):
+            cooldown_hours = 168.0
+
         votes_store = Votes(season_id)
+        remaining = votes_store.cooldown_remaining(
+            team.id, [str(out_member.id), str(in_member.id)], cooldown_hours * 3600
+        )
+        if remaining > 0:
+            await interaction.response.send_message(
+                f"That roster was swapped recently. Try again in "
+                f"{math.ceil(remaining / 3600)} hours.",
+                ephemeral=True,
+            )
+            return
+
         vote = votes_store.open(
             team_id=team.id,
             out_discord_id=str(out_member.id),

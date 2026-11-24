@@ -574,6 +574,7 @@ class Manager:
                 season_id=self.season_id,
                 match_key=match_id,
                 state="started",
+                snapshot=snapshot,
             )
             with bascenev1.ContextRef.empty():
                 bascenev1.apptimer(5.0, self.start_tournament_session)
@@ -679,7 +680,8 @@ class Manager:
         match = self.pending_matches.get(match_key)
         if match is None:
             return {"started": False, "error": "No such pending match."}
-        if not self._readiness_snapshot(match_key)["floor_met"]:
+        snapshot = self._readiness_snapshot(match_key)
+        if not snapshot["floor_met"]:
             return {"started": False, "error": "Need at least one player per team."}
 
         self.active_match = match
@@ -692,6 +694,7 @@ class Manager:
             season_id=self.season_id,
             match_key=match_key,
             state="started",
+            snapshot=snapshot,
         )
         with bascenev1.ContextRef.empty():
             bascenev1.apptimer(5.0, self.start_tournament_session)

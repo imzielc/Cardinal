@@ -34,10 +34,11 @@ async def admin_links(request: web.Request) -> web.Response:
     """Every discord<->account link, plus the pending code count."""
     _require_auth(request)
     db = link_storage.read()
-    return web.json_response({
-        "links": dict(db.links),
-        "pending_codes": len(db.codes),
-    })
+    resp = LinksResponse(
+        links=dict(db.links),
+        pending_codes=len(db.codes),
+    )
+    return web.json_response(resp.to_dict())
 
 
 @route(
@@ -66,11 +67,13 @@ async def give_win(request: web.Request) -> web.Response:
         "give_win",
         {"season": sid, "match": match_key, "team": team_idx, "result": message},
     )
-    return web.json_response({
-        "ok": True,
-        "message": message,
-        "match": match.to_dict() if match else None,
-    })
+    
+    resp = WinResponse(
+        ok=True,
+        message=message,
+        match=match.to_dict() if match else None,
+    )
+    return web.json_response(resp.to_dict())
 
 
 @route(
@@ -103,4 +106,6 @@ async def change_uuid(request: web.Request) -> web.Response:
         "change_uuid",
         {"season": sid, "discord_id": discord_id},
     )
-    return web.json_response({"ok": True})
+    
+    resp = OkResponse(ok=True)
+    return web.json_response(resp.to_dict())

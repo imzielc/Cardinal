@@ -63,6 +63,8 @@ class Registration(Storage):
 
     def commit(self, data: RegistrationSchema) -> None:
         super().commit(data.to_dict())
+        from tournament.storage import seasons
+        seasons.sync_team_count(self.season_id)
 
     def bootstrap(self):
         if not self.path.exists():

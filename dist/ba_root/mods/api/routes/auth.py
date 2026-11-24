@@ -1,7 +1,6 @@
 """secret-code login, discord oauth, session refresh, account linkage."""
 
 import time
-from dataclasses import asdict
 
 import aiohttp
 from aiohttp import web
@@ -67,7 +66,8 @@ async def login(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid_secret_code"}, status=401)
 
     token = auth_lib.issue_jwt(sub="secret", kind="secret", is_admin=True)
-    response = web.json_response({"token": token, "kind": "secret"})
+    resp = LoginResponse(token=token, kind="secret")
+    response = web.json_response(resp.to_dict())
     _set_session_cookie(response, token)
     return response
 
@@ -79,7 +79,8 @@ async def logout(request: web.Request) -> web.Response:
     if auth and auth.get("jti"):
         exp = int(time.time() + auth_lib.JWT_TTL_SECONDS)
         revoked.revoke(auth["jti"], exp)
-    response = web.json_response({"ok": True})
+    resp = OkResponse(ok=True)
+    response = web.json_response(resp.to_dict())
     response.del_cookie("admin_session")
     return response
 
@@ -97,7 +98,8 @@ async def discord_url(request: web.Request) -> web.Response:
         "&scope=identify"
         f"&redirect_uri={_oauth_redirect()}"
     )
-    return web.json_response({"url": url})
+    resp = DiscordUrlResponse(url=url)
+    return web.json_response(resp.to_dict())
 
 
 @route(
@@ -156,7 +158,8 @@ async def discord_callback(request: web.Request) -> web.Response:
         discord_id=discord_id,
         discord_name=display,
     )
-    response = web.json_response({"token": token, "kind": "discord"})
+    resp_obj = LoginResponse(token=token, kind="discord")
+    response = web.json_response(resp_obj.to_dict())
     _set_session_cookie(response, token)
     return response
 
@@ -166,13 +169,14 @@ async def whoami(request: web.Request) -> web.Response:
     """Identity of the caller. Called on every frontend page load."""
     auth = request.get("auth")
     if auth is None:
-        return web.json_response(asdict(WhoAmIResponse()))
+        resp = WhoAmIResponse()
+        return web.json_response(resp.to_dict())
 
     discord_id = auth.get("discord_id")
     linked = bool(discord_id and link.is_linked(discord_id))
     account_id = link.account_of(discord_id) if linked else None
 
-    return web.json_response(asdict(WhoAmIResponse(
+    resp = WhoAmIResponse(
         logged_in=True,
         kind=auth.get("kind", ""),
         is_admin=bool(auth.get("is_admin")),
@@ -181,7 +185,8 @@ async def whoami(request: web.Request) -> web.Response:
         linked=linked,
         account_id=account_id,
         expires_at=int(auth.get("exp") or 0),
-    )))
+    )
+    return web.json_response(resp.to_dict())
 
 
 @route(
@@ -213,13 +218,12 @@ async def link_request(request: web.Request) -> web.Response:
         )
 
     code = link.issue_code(discord_id)
-    return web.json_response({
-        "code": code,
-        "expires_at": time.time() + LINK_EXPIRE_SECONDS,
-        "instruction": (
-            f"Join the Cardinal game server and run /link {code} to finish."
-        ),
-    })
+    resp = LinkRequestResponse(
+        code=code,
+        expires_at=time.time() + LINK_EXPIRE_SECONDS,
+        instruction=f"Join the Cardinal game server and run /link {code} to finish.",
+    )
+    return web.json_response(resp.to_dict())
 
 
 @route(
@@ -263,11 +267,12 @@ async def refresh(request: web.Request) -> web.Response:
     payload = auth_lib.verify_jwt(token) or {}
     expires_at = int(payload.get("exp") or 0)
 
-    response = web.json_response({
-        "token": token,
-        "kind": "discord",
-        "is_admin": is_admin,
-        "expires_at": expires_at,
-    })
+    resp = RefreshResponse(
+        token=token,
+        kind="discord",
+        is_admin=is_admin,
+        expires_at=expires_at,
+    )
+    response = web.json_response(resp.to_dict())
     _set_session_cookie(response, token)
     return response

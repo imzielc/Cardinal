@@ -17,9 +17,41 @@ class Seasons(Storage):
         super().__init__("seasons.json", SEASONS_DIR)
 
     def bootstrap(self) -> None:
-        """creates the file if missing."""
+        """creates the file if missing, backfills champion and team_count for existing seasons."""
         if not self.path.exists():
             self.commit(SeasonsSchema())
+            return
+        
+        # backfill champion and team_count for existing seasons
+        from tournament.brackets import Brackets
+        from tournament.registration import Registration
+        
+        db = self.read()
+        changed = False
+        
+        for season_id, season in db.seasons.items():
+            # backfill team_count
+            try:
+                reg = Registration(season_id).read()
+                new_count = len(reg.teams)
+                if season.team_count != new_count:
+                    season.team_count = new_count
+                    changed = True
+            except Exception:
+                pass
+            
+            # backfill champion for completed seasons
+            if season.stage == TournamentStage.COMPLETED and not season.champion:
+                try:
+                    meta = Brackets(season_id).read_meta()
+                    if meta.placements:
+                        season.champion = meta.placements[0].team
+                        changed = True
+                except Exception:
+                    pass
+        
+        if changed:
+            self.commit(db)
 
     @property
     def active_season(self) -> str:
@@ -127,6 +159,22 @@ class Seasons(Storage):
         data.panel_channel_id = 0
         data.panel_message_id = 0
         self.commit(data)
+
+    def sync_team_count(self, season_id: str) -> None:
+        """updates team_count for a season from registrations. only writes if changed."""
+        from tournament.registration import Registration
+        
+        try:
+            reg = Registration(season_id).read()
+            new_count = len(reg.teams)
+        except Exception:
+            return
+        
+        db = self.read()
+        season = db.seasons.get(season_id)
+        if season and season.team_count != new_count:
+            season.team_count = new_count
+            self.commit(db)
 
 
 seasons = Seasons()

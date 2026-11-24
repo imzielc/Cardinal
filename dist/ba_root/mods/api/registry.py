@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Callable
+from dataclasses import is_dataclass
+from typing import Any, Callable, get_args, get_origin
 
 REGISTRY: list[dict] = []
 
@@ -78,7 +79,6 @@ def build_spec() -> dict:
 
 def _build() -> dict:
     endpoints = []
-    all_defs: dict[str, dict] = {}
 
     for entry in REGISTRY:
         item = {
@@ -100,10 +100,10 @@ def _build() -> dict:
             ]
 
         if entry["body"] is not None:
-            item["request_body"] = _schema_and_defs(entry["body"], all_defs)
+            item["request_body_example"] = _example_from_schema(entry["body"])
 
         if entry["response"] is not None:
-            item["response"] = _schema_and_defs(entry["response"], all_defs)
+            item["response_example"] = _example_from_schema(entry["response"])
 
         endpoints.append(item)
 
@@ -111,24 +111,55 @@ def _build() -> dict:
         "version": "1",
         "generated_at": int(time.time()),
         "endpoints": endpoints,
-        "schemas": all_defs,
     }
 
 
-def _schema_and_defs(cls: type, defs: dict[str, dict]) -> dict:
-    """returns a $ref-and-$defs schema for cls, merging its defs into defs."""
-    from pydantic import TypeAdapter
-
-    try:
-        raw = TypeAdapter(cls).json_schema(ref_template="#/schemas/{model}")
-    except Exception as e:
-        name = getattr(cls, "__name__", str(cls))
-        return {"error": f"could not build schema for {name}: {e}"}
-
-    for name, sub in (raw.pop("$defs", None) or {}).items():
-        defs.setdefault(name, sub)
-
-    return raw
+def _example_from_schema(cls: type) -> Any:
+    """generates a dummy JSON example from a schema type."""
+    if cls is type(None) or cls is None:
+        return None
+    
+    origin = get_origin(cls)
+    args = get_args(cls)
+    
+    # handle Union (e.g., str | None)
+    if origin is type(None) or (origin and origin.__name__ == 'UnionType'):
+        non_none = [a for a in args if a is not type(None)]
+        if non_none:
+            return _example_from_schema(non_none[0])
+        return None
+    
+    # handle list
+    if origin is list:
+        if args:
+            return [_example_from_schema(args[0])]
+        return []
+    
+    # handle dict
+    if origin is dict:
+        if len(args) >= 2:
+            return {"example_key": _example_from_schema(args[1])}
+        return {}
+    
+    # handle dataclass
+    if is_dataclass(cls):
+        try:
+            instance = cls()
+            return instance.to_dict()
+        except Exception:
+            return {}
+    
+    # primitives
+    if cls is str:
+        return ""
+    if cls is int:
+        return 0
+    if cls is float:
+        return 0.0
+    if cls is bool:
+        return False
+    
+    return None
 
 
 def _path_params(path: str, overrides: dict[str, str]) -> list[dict]:

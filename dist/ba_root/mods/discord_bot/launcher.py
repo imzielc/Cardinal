@@ -13,7 +13,11 @@ import babase
 from commands import command_line
 from server import config
 from server.clients import Client, all_clients
+from server.storage import MODS_DIR
 from server.utils import send
+
+_process: subprocess.Popen | None = None
+_spawn_lock = threading.Lock()
 
 
 class SocketTunnel(threading.Thread):
@@ -139,36 +143,85 @@ class SocketTunnel(threading.Thread):
             self.join(timeout=1.0)
 
 
-async def shutdown(self) -> None:
-    print("shutting down discord bot")
-    if hasattr(self, "process") and self.process and self.process.poll() is None:
+BOT_SCRIPT = Path(__file__).resolve().parent / "bot.py"
+BOT_LOG = Path(__file__).resolve().parent / "bot.log"
+
+
+def _running_pids() -> list[int]:
+    """pids of running bot processes. empty where /proc is unavailable."""
+    pids = []
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return pids
+
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
         try:
-            self.process.terminate()
-            self.process.wait(timeout=2.0)
-        except:
-            self.process.kill()
-        self.process = None
-
-    if self.socket:
-        self.socket.shutdown()
-        self.socket = None
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\\", b"/")
+        except OSError:
+            continue
+        if b"discord_bot/bot.py" in cmdline:
+            pids.append(int(entry.name))
+    return pids
 
 
-def launch(self) -> None:
+def bot_running() -> bool:
+    """whether a bot process is already up, ours or one left from before."""
+    if _process and _process.poll() is None:
+        return True
+    return bool(_running_pids())
+
+
+def _spawn() -> None:
+    """start the bot detached, so it outlives the game process."""
+    global _process
+
     uv_path = shutil.which("uv")
+    if not uv_path:
+        print("[bot] uv not found, cannot spawn the bot")
+        return
 
     if importlib.util.find_spec("discord") is None:
         subprocess.run([uv_path, "add", "discord.py"], check=True)
 
-    script_path = str(Path(__file__).resolve().parent / "bot.py")
-    cmd = [uv_path, "run", script_path]
-
-    MODS_DIR = str(Path(__file__).resolve().parent.parent)
     env = os.environ.copy()
-    env["PYTHONPATH"] = MODS_DIR
+    env["PYTHONPATH"] = str(MODS_DIR)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    print("Starting discord bot.")
-    self.process = subprocess.Popen(cmd, env=env)
+    env["PYTHONUNBUFFERED"] = "1"
+
+    print(f"[bot] starting discord bot (logs: {BOT_LOG})")
+    with open(BOT_LOG, "a") as log:
+        _process = subprocess.Popen(
+            [uv_path, "run", str(BOT_SCRIPT)],
+            env=env,
+            start_new_session=True,
+            stdout=log,
+            stderr=log,
+        )
+
+
+def ensure_bot() -> None:
+    """starts the bot only if none is running.
+
+    a running bot is left alone on purpose: it survives game restarts and keeps
+    the code it booted with until /bot-restart replaces it.
+    """
+    if config.discord.token == "ENTER-YOUR-BOT-TOKEN-HERE":
+        return
+
+    with _spawn_lock:
+        if bot_running():
+            return
+        _spawn()
+
+
+async def shutdown(self) -> None:
+    """shut down the game-side socket tunnel only. the bot stays up."""
+    if self.socket:
+        self.socket.shutdown()
+        self.socket = None
 
 
 def setup(self) -> None:
@@ -176,7 +229,7 @@ def setup(self) -> None:
         print("Error: Put a valid bot token.")
         return
 
-    threading.Thread(target=launch, args=(self,), daemon=True).start()
+    threading.Thread(target=ensure_bot, daemon=True).start()
 
     port = config.discord.port
     self.socket = SocketTunnel(port)

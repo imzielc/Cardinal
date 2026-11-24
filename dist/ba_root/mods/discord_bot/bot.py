@@ -2,18 +2,20 @@
 
 import asyncio
 import logging
+import time
 from traceback import format_exc
 
 from discord import Activity, ActivityType, Intents, Interaction, app_commands
 from discord.ext import commands
 
+from discord_bot import runtime
 from discord_bot.cogs.account import AccountCommands
 from discord_bot.cogs.config import ConfigCommands
 from discord_bot.cogs.general import GeneralCommands
 from discord_bot.cogs.watcher import TeamInvitationWatcher
 from discord_bot.cogs.scheduler import MaintenanceScheduler, RoundScheduler
 from discord_bot.cogs.tournament import TournamentCommands
-from discord_bot.events import EventReceiver
+from discord_bot.events import EventReceiver, reconcile_match_threads
 from discord_bot.held_posts import HeldPosts
 from discord_bot.ui import (
     BenchPanelView,
@@ -29,6 +31,8 @@ from tournament.panels import bench_panels, ready_panels
 from tournament.registration import Registration
 from tournament.votes import Votes
 
+RETRY_DELAY = 10
+
 
 class DiscordBot(commands.Bot):
     def __init__(self) -> None:
@@ -40,6 +44,7 @@ class DiscordBot(commands.Bot):
             owner_id=config.discord.owner_id,
         )
         self._events: EventReceiver | None = None
+        self._reconciled = False
 
     async def setup_hook(self) -> None:
         self._restore_invitations()
@@ -120,6 +125,11 @@ class DiscordBot(commands.Bot):
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
 
+        # the game announces a round once; recover threads it sent before we were up.
+        if not self._reconciled:
+            self._reconciled = True
+            await reconcile_match_threads(self)
+
     async def close(self) -> None:
         if self._events:
             self._events.shutdown()
@@ -127,6 +137,24 @@ class DiscordBot(commands.Bot):
         await super().close()
 
 
+def main() -> None:
+    """runs the bot, restarting in-process on crashes and reloading on request."""
+    while True:
+        bot = DiscordBot()
+        try:
+            bot.run(token=config.discord.token, log_level=logging.WARNING)
+        except (KeyboardInterrupt, SystemExit):
+            # someone signalled the process: treat it as a stop, not a reload.
+            runtime.stop()
+        except Exception:
+            # keep running the code that is already loaded; only /bot-restart
+            # is allowed to pull in new code.
+            print(f"[bot] crashed, restarting in {RETRY_DELAY}s:\n{format_exc()}")
+            time.sleep(RETRY_DELAY)
+            continue
+
+        runtime.replace()
+
+
 if __name__ == "__main__":
-    bot = DiscordBot()
-    bot.run(token=config.discord.token, log_level=logging.WARNING)
+    main()
